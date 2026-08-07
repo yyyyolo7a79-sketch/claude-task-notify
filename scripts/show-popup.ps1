@@ -303,10 +303,12 @@ try {
     # ① 叠加 WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW（Ptr API + 正确失败判断）
     $exOld = [Win32Ext]::GetWindowLongPtr64($hwnd, $GWL_EXSTYLE)
     $exNew = [IntPtr]($exOld.ToInt64() -bor $WS_EX_NOACTIVATE -bor $WS_EX_TOOLWINDOW)
-    [System.Runtime.InteropServices.Marshal]::SetLastWin32Error(0)
     $r1 = [Win32Ext]::SetWindowLongPtr64($hwnd, $GWL_EXSTYLE, $exNew)
-    # 第四轮审查修复：该 API 返回旧值（可能为零），只有"返回零且 last error 非零"才算失败
-    if ($r1 -eq [IntPtr]::Zero -and [System.Runtime.InteropServices.Marshal]::GetLastWin32Error() -ne 0) {
+    # 失败判断：SetWindowLongPtr 返回旧值（理论可为 0）。
+    # ⚠️ PS 5.1 实测无 Marshal.SetLastWin32Error（.NET 4.5 方法，但 PS 5.1 运行时不可用——
+    #    曾因此抛 RuntimeException 导致弹窗渲染失败），无法先清零 last error。
+    #    实用方案：实际窗口的 GWL_EXSTYLE 旧值几乎不可能为 0，返回零即视为失败（可接受边界）
+    if ($r1 -eq [IntPtr]::Zero) {
         Write-NotifyLog "UI style-apply-failed"
     }
     # 用 SWP_FRAMECHANGED | SWP_NOACTIVATE 刷新扩展样式（不移动、不激活）
