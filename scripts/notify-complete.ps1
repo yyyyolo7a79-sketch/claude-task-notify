@@ -76,17 +76,21 @@ function Get-LastAssistantFromTranscript {
 }
 
 # 启发式判断：是否需要用户提供相关信息
-# 审查修复：
-#   ① 优先识别 skill 约定的收尾标记（✅ 已完成：/ ❓ 需要你提供：）——格式即答案，不再启发式
+# 第三轮审查修复：
+#   ① skill 收尾标记：只识别**行首**标记（`✅ 已完成` / `❓ 需要你提供`），
+#      且取**最后一行**匹配——正文中出现示例文本不再误导判断
 #   ② 排除礼貌性追问（"需要我…吗？"），避免可选优化询问误判为阻塞性请求
 #   ③ 兜底启发式只分析最后一段（完成句常以"请检查结果"收尾，全文搜索会误判）；
 #      请求词只保留明确请求句式
 function Test-NeedInfo {
     param([string]$t)
     if (-not $t) { return $false }
-    # ① skill 收尾标记优先（格式即答案）
-    if ($t -match "❓\s*需要你提供") { return $true }
-    if ($t -match "✅\s*已完成") { return $false }
+    # ① skill 收尾标记：行首识别，取最后一行匹配（修复示例文本误导）
+    $markers = @($t -split '\r?\n' | Where-Object { $_ -match '^\s*(❓\s*需要你提供|✅\s*已完成)' })
+    if ($markers.Count -gt 0) {
+        if ($markers[-1] -match '^\s*❓') { return $true }
+        if ($markers[-1] -match '^\s*✅') { return $false }
+    }
     # ② 礼貌性追问排除："需要我继续优化吗？" → 不算阻塞性请求
     if ($t -match "需要我[^\r\n]{0,20}[吗么][?？]?\s*$") { return $false }
     # ③ 兜底启发式（只分析最后一段）
@@ -125,15 +129,28 @@ function Get-Summary {
 }
 
 # 2 秒去重：同一 (session, 回复) 在窗口内只通知一次
-# 审查修复：读-判-写整体包在命名 Mutex 内，多个实例并发时串行化
-#   （GUID 临时名只避免文件互相覆盖，不能解决"同时读到旧状态"的竞态）
+# 第三轮审查修复：
+#   - 读-判-写整体包在命名 Mutex 内串行化
+#   - 超时 100ms（不阻塞 500ms 目标）；未取得锁 → fail-open 直接返回（重复弹一次
+#     无害），绝不无锁读写 state.json
+#   - AbandonedMutexException = 已取得锁（上一持有者崩溃），必须释放
+#   - 取得锁后才计算时间戳（等待期间可能超窗）
 function Test-Dedupe {
     param([string]$key)
-    $now = [DateTime]::UtcNow
     $mutex = New-Object System.Threading.Mutex($false, 'Local\ClaudeCodeNotifyDedupe')
     $got = $false
-    try { $got = $mutex.WaitOne(2000) } catch { }
     try {
+        $got = $mutex.WaitOne(100)
+    } catch [System.Threading.AbandonedMutexException] {
+        $got = $true    # Abandoned：锁已取得，稍后必须释放
+    } catch { }
+    if (-not $got) {
+        # fail-open：不去重（重复弹一次无害），不访问 state.json
+        $mutex.Dispose()
+        return $false
+    }
+    try {
+        $now = [DateTime]::UtcNow
         if (Test-Path $STATE_FILE) {
             try {
                 $st = Get-Content -Raw $STATE_FILE -Encoding UTF8 | ConvertFrom-Json
@@ -152,7 +169,7 @@ function Test-Dedupe {
         } catch { }
         return $false
     } finally {
-        if ($got) { try { $mutex.ReleaseMutex() } catch { } }
+        try { $mutex.ReleaseMutex() } catch { }
         $mutex.Dispose()
     }
 }

@@ -100,26 +100,42 @@ Add-Type -AssemblyName PresentationFramework
 Add-Type -AssemblyName PresentationCore
 Add-Type -AssemblyName WindowsBase
 Add-Type -AssemblyName System.Xaml
-Add-Type -AssemblyName System.Windows.Forms   # 仅用 Screen/Cursor 做多显示器定位
 
 # Win32：WS_EX_NOACTIVATE（点击不抢焦点）+ SetWindowPos（物理像素定位）
-# 审查修复：Get/SetWindowLongPtr（64位）；GetDpiForMonitor 取目标屏 DPI（混合 DPI 正确）
+# 第三轮审查修复：
+#   - SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)：进程默认 system-aware，
+#     MDT_EFFECTIVE_DPI 会返回系统 DPI 而非目标屏 DPI；必须在创建任何窗口前声明
+#   - SetLastError=true + 返回值检查 + DPI fallback（查询失败回退 96）
+#   - 定位全程使用同一 HMONITOR（单次 GetCursorPos → MonitorFromPoint → GetMonitorInfo/GetDpiForMonitor）
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
 public static class Win32Ext {
-    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtr")]
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtr", SetLastError = true)]
     public static extern IntPtr GetWindowLongPtr64(IntPtr hWnd, int nIndex);
-    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtr")]
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtr", SetLastError = true)]
     public static extern IntPtr SetWindowLongPtr64(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
-    [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
-    [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT pt);
-    [DllImport("user32.dll")] public static extern IntPtr MonitorFromPoint(POINT pt, uint dwFlags);
-    [DllImport("shcore.dll")] public static extern int GetDpiForMonitor(IntPtr hMonitor, int dpiType, out uint dpiX, out uint dpiY);
+    [DllImport("user32.dll", SetLastError = true)] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+    [DllImport("user32.dll", SetLastError = true)] public static extern bool SetProcessDpiAwarenessContext(IntPtr value);
+    [DllImport("user32.dll", SetLastError = true)] public static extern bool GetCursorPos(out POINT pt);
+    [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr MonitorFromPoint(POINT pt, uint dwFlags);
+    [DllImport("user32.dll", SetLastError = true)] public static extern bool GetMonitorInfo(IntPtr hMonitor, out MONITORINFO lpmi);
+    [DllImport("shcore.dll", SetLastError = true)] public static extern int GetDpiForMonitor(IntPtr hMonitor, int dpiType, out uint dpiX, out uint dpiY);
     [StructLayout(LayoutKind.Sequential)]
     public struct POINT { public int X; public int Y; }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct RECT { public int L; public int T; public int R; public int B; }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MONITORINFO {
+        public int cbSize;
+        public RECT rcMonitor;
+        public RECT rcWork;
+        public uint dwFlags;
+    }
 }
 "@
+# PER_MONITOR_AWARE_V2 = -4：必须在任何 WPF 窗口创建之前调用（失败则回退 system-aware，可接受）
+try { $null = [Win32Ext]::SetProcessDpiAwarenessContext([IntPtr](-4)) } catch { }
 $GWL_EXSTYLE = -20
 $WS_EX_NOACTIVATE = 0x08000000
 $WS_EX_TOOLWINDOW = 0x00000080
@@ -229,6 +245,7 @@ $tbBody.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Left
 $tbBody.TextWrapping = [System.Windows.TextWrapping]::Wrap
 $tbBody.TextTrimming = [System.Windows.TextTrimming]::CharacterEllipsis
 $tbBody.MaxHeight = $BODY_H
+[System.Windows.Controls.Grid]::SetColumnSpan($tbBody, 3)   # 第三轮审查修复：正文跨全部三列，否则被压缩到标题列宽度
 $grid.Children.Add($tbBody) | Out-Null
 
 $win.Content = $border
@@ -238,11 +255,11 @@ $win.Add_MouseLeftButtonDown({
     $script:animTimer.Stop()
     $win.Close()
 })
-# ---- 动画：淡入 → 停留 8s → 淡出 ----
-# 审查修复：hold 用真实时间戳（DispatcherTimer 不保证每 20ms 调度，
-#   累计 tick 会把 8 秒拖成 15 秒——实测日志确认）
+# ---- 动画：淡入 → 停留 8s（hold）→ 淡出 ----
+# 审查修复：hold 用 Stopwatch 单调时钟（DispatcherTimer 累计 tick 会把 8 秒拖成
+#   15 秒；DateTime 受系统校时影响，Stopwatch 不受）
 $script:phase = "in"
-$script:holdStart = [DateTime]::UtcNow
+$script:holdSw = [System.Diagnostics.Stopwatch]::StartNew()
 
 $animTimer = New-Object System.Windows.Threading.DispatcherTimer
 $animTimer.Interval = [TimeSpan]::FromMilliseconds(20)
@@ -252,10 +269,10 @@ $animTimer.Add_Tick({
         if ($win.Opacity -ge 1.0) {
             $win.Opacity = 1.0
             $script:phase = "hold"
-            $script:holdStart = [DateTime]::UtcNow
+            $script:holdSw.Restart()
         }
     } elseif ($script:phase -eq "hold") {
-        if (([DateTime]::UtcNow - $script:holdStart).TotalMilliseconds -ge $DURATION_MS) {
+        if ($script:holdSw.ElapsedMilliseconds -ge $DURATION_MS) {
             $script:phase = "out"
         }
     } elseif ($script:phase -eq "out") {
@@ -273,32 +290,43 @@ try {
     $null = $win.Show()
     $hwnd = (New-Object System.Windows.Interop.WindowInteropHelper($win)).Handle
 
-    # ① 叠加 WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW（Ptr API + 失败检查）
+    # ① 叠加 WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW（Ptr API + 返回值检查）
     $exOld = [Win32Ext]::GetWindowLongPtr64($hwnd, $GWL_EXSTYLE)
     $exNew = [IntPtr]($exOld.ToInt64() -bor $WS_EX_NOACTIVATE -bor $WS_EX_TOOLWINDOW)
-    $null = [Win32Ext]::SetWindowLongPtr64($hwnd, $GWL_EXSTYLE, $exNew)
+    $r1 = [Win32Ext]::SetWindowLongPtr64($hwnd, $GWL_EXSTYLE, $exNew)
+    if ($r1 -eq [IntPtr]::Zero) { Write-NotifyLog "UI style-apply-failed" }
     # 用 SWP_FRAMECHANGED | SWP_NOACTIVATE 刷新扩展样式（不移动、不激活）
     $null = [Win32Ext]::SetWindowPos($hwnd, [IntPtr]::Zero, 0, 0, 0, 0,
         ($SWP_FRAMECHANGED -bor $SWP_NOACTIVATE -bor $SWP_NOSIZE -bor $SWP_NOZORDER))
 
-    # ② 多显示器定位：鼠标所在屏幕（物理像素）
-    # 目标屏 DPI 用 GetDpiForMonitor 获取（不能读当前窗口所在屏的 TransformToDevice——
-    #   窗口仍在主屏时副屏 scale 会算错，混合 DPI 修复）
+    # ② 多显示器定位（第三轮审查修复）：
+    #    单次 GetCursorPos（避免两次调用间鼠标跨屏）→ 同一 HMONITOR 的
+    #    GetMonitorInfo 取工作区 + GetDpiForMonitor 取目标屏 DPI（失败回退 96）
     $pt = New-Object Win32Ext+POINT
     $null = [Win32Ext]::GetCursorPos([ref]$pt)
     $hMon = [Win32Ext]::MonitorFromPoint($pt, $MONITOR_DEFAULTTONEAREST)
-    $dpiX = 0; $dpiY = 0
-    $null = [Win32Ext]::GetDpiForMonitor($hMon, $MDT_EFFECTIVE_DPI, [ref]$dpiX, [ref]$dpiY)
+    $mi = New-Object Win32Ext+MONITORINFO
+    $mi.cbSize = [System.Runtime.InteropServices.Marshal]::SizeOf($mi)
+    if (-not [Win32Ext]::GetMonitorInfo($hMon, [ref]$mi)) {
+        Write-NotifyLog "UI monitor-info-failed"
+    }
+    $dpiX = 96; $dpiY = 96
+    $hr = [Win32Ext]::GetDpiForMonitor($hMon, $MDT_EFFECTIVE_DPI, [ref]$dpiX, [ref]$dpiY)
+    if ($hr -ne 0 -or $dpiX -le 0 -or $dpiY -le 0) {
+        # DPI 查询失败：回退 96（WPF 默认），窗口尺寸按 1.0 计算
+        $dpiX = 96; $dpiY = 96
+        Write-NotifyLog "UI dpi-fallback-96"
+    }
     $targetScale = $dpiX / 96.0
-    $scr = [System.Windows.Forms.Screen]::FromPoint([System.Windows.Forms.Cursor]::Position)
-    $wa2 = $scr.WorkingArea
     $winPhysW = [int](($W + 2 * $SHADOW_PAD) * $targetScale)
     $winPhysH = [int](($H + 2 * $SHADOW_PAD) * $targetScale)
     $marginPx = [int]($MARGIN * $targetScale)
-    $x = $wa2.Right - $winPhysW - $marginPx
-    $y = $wa2.Bottom - $winPhysH - $marginPx
-    $null = [Win32Ext]::SetWindowPos($hwnd, [IntPtr]::Zero, $x, $y, $winPhysW, $winPhysH,
-        ($SWP_NOACTIVATE -bor $SWP_NOZORDER))
+    $x = $mi.rcWork.R - $winPhysW - $marginPx
+    $y = $mi.rcWork.B - $winPhysH - $marginPx
+    if (-not [Win32Ext]::SetWindowPos($hwnd, [IntPtr]::Zero, $x, $y, $winPhysW, $winPhysH,
+        ($SWP_NOACTIVATE -bor $SWP_NOZORDER))) {
+        Write-NotifyLog "UI position-failed"
+    }
 
     $animTimer.Start()
     $null = $app.Run()   # Run() 返回退出码，必须吞掉，保持 stdout 干净
