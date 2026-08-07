@@ -73,7 +73,7 @@ claude-task-notify/
 
 把下面这段话连同本仓库链接一起发给你的 Claude Code，它会自动完成全部安装并自测：
 
-> 请把仓库 `<本仓库链接>` 中的 `claude-task-notify` 安装到我的全局配置（Windows）：
+> 请把仓库 `https://github.com/yyyyolo7a79-sketch/claude-task-notify` 中的 `claude-task-notify` 安装到我的全局配置（Windows）：
 > 1. 将 `scripts\notify-complete.ps1` 与 `scripts\show-popup.ps1` 复制到 `~\.claude\scripts\`
 > 2. 在 `~\.claude\settings.json` 顶层添加 `hooks.Stop`，command 用绝对解释器路径 + `-WindowStyle Hidden`：
 >    `"\"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe\" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File \"C:\Users\<你的用户名>\.claude\scripts\notify-complete.ps1\""`，`"timeout": 5`
