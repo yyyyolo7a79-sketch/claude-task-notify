@@ -18,6 +18,12 @@ param(
 # ---- 编码 ----
 try { [Console]::InputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 
+# 脚本级总兜底：Add-Type/WPF 初始化等任何未捕获异常都记日志（不静默退出）
+trap {
+    try { Write-NotifyLog ("UI fatal: " + $_.Exception.GetType().Name) } catch { }
+    exit 1
+}
+
 # =============================================================
 # 常量（尺寸基准，WPF 单位 = DIP，等价 HTML CSS px）
 # =============================================================
@@ -80,6 +86,23 @@ Add-Type -AssemblyName PresentationFramework
 Add-Type -AssemblyName PresentationCore
 Add-Type -AssemblyName WindowsBase
 Add-Type -AssemblyName System.Xaml
+Add-Type -AssemblyName System.Windows.Forms   # 仅用 Screen/Cursor 做多显示器定位
+
+# Win32：WS_EX_NOACTIVATE（点击不抢焦点）+ SetWindowPos（物理像素定位）
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class Win32Ext {
+    [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+    [DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+    [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+}
+"@
+$GWL_EXSTYLE = -20
+$WS_EX_NOACTIVATE = 0x08000000
+$WS_EX_TOOLWINDOW = 0x00000080
+$SWP_NOSIZE = 0x0001
+$SWP_NOZORDER = 0x0004
 
 $app = New-Object System.Windows.Application
 
@@ -91,8 +114,9 @@ $win.AllowsTransparency = $true
 $win.Background = [System.Windows.Media.Brushes]::Transparent
 $win.Topmost = $true
 $win.ShowInTaskbar = $false
-$win.ShowActivated = $false          # 不激活，不抢焦点
+$win.ShowActivated = $false          # 不激活，不抢焦点（WS_EX_NOACTIVATE 在 Show 后叠加）
 $win.Opacity = 0.0
+# 初始位置（Show 后会被 SetWindowPos 按鼠标所在屏幕精确覆盖）
 $wa = [System.Windows.SystemParameters]::WorkArea
 $win.Left = $wa.Right - $W - $MARGIN - $SHADOW_PAD
 $win.Top = $wa.Bottom - $H - $MARGIN - $SHADOW_PAD
@@ -136,6 +160,8 @@ if ($project) {
     $tbProject.FontSize = $F_BODY * 0.85
     $tbProject.Foreground = [System.Windows.Media.Brushes]::Gray
     $tbProject.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
+    $tbProject.MaxWidth = 140                     # 长项目名截断，避免覆盖 ✕
+    $tbProject.TextTrimming = [System.Windows.TextTrimming]::CharacterEllipsis
     $stackTitle.Children.Add($tbProject) | Out-Null
 }
 $grid.Children.Add($stackTitle) | Out-Null
@@ -210,9 +236,30 @@ $animTimer.Add_Tick({
 
 # ---- 显示 + 消息循环 ----
 $win.Add_Closed({ $app.Shutdown() })
-$null = $win.Show()
-$animTimer.Start()
-$null = $app.Run()   # Run() 返回退出码，必须吞掉，保持 stdout 干净
+try {
+    $null = $win.Show()
 
-Write-NotifyLog "UI closed"
+    # 叠加 WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW：点击也不激活，不抢焦点
+    $hwnd = (New-Object System.Windows.Interop.WindowInteropHelper($win)).Handle
+    $ex = [Win32Ext]::GetWindowLong($hwnd, $GWL_EXSTYLE)
+    $null = [Win32Ext]::SetWindowLong($hwnd, $GWL_EXSTYLE, ($ex -bor $WS_EX_NOACTIVATE -bor $WS_EX_TOOLWINDOW))
+
+    # 多显示器：弹在鼠标所在屏幕的右下角（SetWindowPos 物理像素精确定位）
+    $scr = [System.Windows.Forms.Screen]::FromPoint([System.Windows.Forms.Cursor]::Position)
+    $wa2 = $scr.WorkingArea
+    $null = [Win32Ext]::SetWindowPos(
+        $hwnd, [IntPtr]::Zero,
+        ($wa2.Right - $W - $MARGIN - $SHADOW_PAD),
+        ($wa2.Bottom - $H - $MARGIN - $SHADOW_PAD),
+        0, 0, ($SWP_NOSIZE -bor $SWP_NOZORDER))
+
+    $animTimer.Start()
+    $null = $app.Run()   # Run() 返回退出码，必须吞掉，保持 stdout 干净
+    Write-NotifyLog "UI closed"
+} catch {
+    # 顶层兜底：任何 UI 初始化/渲染失败都不静默退出，记日志便于诊断
+    Write-NotifyLog ("UI render-error: " + $_.Exception.GetType().Name)
+    exit 1
+}
+
 exit 0

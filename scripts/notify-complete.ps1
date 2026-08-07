@@ -25,7 +25,9 @@ $LOG_FILE = "$DIR\notify.log"
 $LOG_MAX = 200KB
 $DEDUPE_MS = 2000      # 去重窗口
 $PAYLOAD_TTL = 10      # payload 清理阈值（分钟）
-$SHOW_POPUP = "C:\Users\PC\.claude\scripts\show-popup.ps1"
+# 可移植路径：UI 脚本与入口同目录（$PSScriptRoot），解释器用绝对路径（防 PATH 劫持）
+$SHOW_POPUP = Join-Path $PSScriptRoot 'show-popup.ps1'
+$PS_EXE = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
 
 # =============================================================
 # 辅助函数
@@ -74,29 +76,35 @@ function Get-LastAssistantFromTranscript {
 }
 
 # 启发式判断：是否需要用户提供相关信息
+# 注意：只分析最后一段（完成句常以"请检查结果"等收尾，全文搜索会误判）；
+#       请求词只保留明确请求句式，去掉完成句中常见的 检查/说明/给出/回复/分享
 function Test-NeedInfo {
     param([string]$t)
     if (-not $t) { return $false }
+    $paras = @($t -split '(\r?\n\s*){1,}' | Where-Object { $_.Trim() })
+    if ($paras.Count -gt 0) { $t = $paras[$paras.Count - 1] }
     $t = $t.Trim()
     if ($t -match "[?？]\s*$") { return $true }
-    if ($t -match "请(你|您)?(提供|告诉|告知|确认|给出|补充|说明|检查|输入|发送|上传|分享|回复|告知)") { return $true }
+    if ($t -match "请(你|您)?(提供|告诉我|告知|确认|补充|输入|上传|发送|给我)") { return $true }
     if ($t -match "需要你|需要您|麻烦你|请把|能否|你能不") { return $true }
     return $false
 }
 
-# 摘要：清洗代码块/HTML/实体/emoji/markdown/URL，取首段，截断 50 字
+# 摘要：清洗代码块/HTML/实体/markdown/图片/URL，取首段，截断 50 字
+# 顺序要点：图片先删（否则 URL 删除后残留 "![x]("）；标题/列表正则带 (?m) multiline；
+#           不再删 emoji（WPF DirectWrite 渲染正常，且 surrogate 正则误删所有非 BMP 字符）
 function Get-Summary {
     param([string]$t)
     if (-not $t) { return "" }
     $clean = [regex]::Replace($t, '```[\s\S]*?```', ' ')
     $clean = $clean -replace '`[^`]*`', ' '
+    $clean = [regex]::Replace($clean, '!\[[^\]]*\]\([^)]*\)', ' ')   # 图片先删
     $clean = [regex]::Replace($clean, '<[^>]+>', ' ')
     $clean = $clean -replace '&amp;', '&' -replace '&lt;', '<' -replace '&gt;', '>' -replace '&quot;', '"'
     $clean = $clean -replace '&[a-zA-Z#0-9]{1,8};', ' '
-    $clean = $clean -replace '\*\*?', '' -replace '^#+\s*', '' -replace '^\s*[-*+]\s*', ''
-    $clean = [regex]::Replace($clean, '[\uD800-\uDBFF][\uDC00-\uDFFF]', '')
-    $clean = $clean -replace 'https?://[^\s]+', ''      # 删 URL（B 级改进）
-    $clean = $clean -replace '!\[[^\]]*\]\([^)]*\)', ''  # 删图片 Markdown
+    $clean = [regex]::Replace($clean, '(?m)^#+\s*', '')              # multiline 标题
+    $clean = [regex]::Replace($clean, '(?m)^\s*[-*+]\s*', '')        # multiline 列表
+    $clean = $clean -replace 'https?://[^\s]+', ''                   # URL 后删
     $paras = @($clean -split '(\r?\n\s*){2,}' | Where-Object { $_.Trim() })
     if ($paras.Count -gt 0) { $clean = $paras[0] }
     $clean = $clean -replace '\s+', ' '
@@ -120,7 +128,8 @@ function Test-Dedupe {
     # 原子写：先写临时文件再 Move（避免并发写损坏）
     try {
         if (-not (Test-Path $DIR)) { $null = New-Item -ItemType Directory -Force $DIR }
-        $tmp = "$STATE_FILE.tmp"
+        # GUID 临时名：多个实例并发时互不覆盖（固定 .tmp 名会互相踩踏）
+        $tmp = "$STATE_FILE.tmp-" + [Guid]::NewGuid().ToString("N")
         @{ key = $key; ts = $now.ToString("o") } | ConvertTo-Json |
             Set-Content $tmp -Encoding UTF8
         Move-Item -Force $tmp $STATE_FILE
@@ -166,6 +175,11 @@ if ($data.stop_hook_active) {
     Write-NotifyLog ("SKIP stop_hook_active sid=" + ($data.session_id -replace '(.{8}).*', '$1'))
     exit 0
 }
+if ($data.background_tasks -and @($data.background_tasks).Count -gt 0) {
+    # 后台任务仍在运行：主回复虽结束但任务未完成，不弹"任务完成"（避免误导）
+    Write-NotifyLog ("SKIP background_tasks sid=" + ($data.session_id -replace '(.{8}).*', '$1'))
+    exit 0
+}
 
 # 内容获取：优先 last_assistant_message，缺失则读 transcript 兜底
 $rawText = $data.last_assistant_message
@@ -209,15 +223,17 @@ try {
 }
 
 # 派生独立 UI 进程（-STA 为 WPF 必需；Hidden 隐藏控制台窗口）
+# 注意：PS 5.1 的 Start-Process -ArgumentList 数组会拼接为字符串且不含空格引号，
+#       因此用字符串形式并手动为路径加引号（路径固定、无用户输入，无注入面）
 try {
-    Start-Process -FilePath "powershell.exe" -ArgumentList @(
-        "-NoProfile", "-STA", "-WindowStyle", "Hidden",
-        "-ExecutionPolicy", "Bypass",
-        "-File", $SHOW_POPUP,
-        "-PayloadFile", $payloadFile
-    ) | Out-Null
+    Start-Process -FilePath $PS_EXE -ArgumentList (
+        '-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $SHOW_POPUP +
+        '" -PayloadFile "' + $payloadFile + '"'
+    ) -WindowStyle Hidden | Out-Null
 } catch {
     Write-NotifyLog "ERR spawn-ui"
+    # 派生失败立即清理 payload，避免残留
+    Remove-Item $payloadFile -Force -ErrorAction SilentlyContinue
     exit 0
 }
 
