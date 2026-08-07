@@ -60,7 +60,11 @@ function Test-NeedInfo {
     return $false
 }
 
-# 提取摘要：去 markdown 符号、压缩空白、截断 60 字
+# 摘要截断长度（字）——必须在 Get-Summary 调用前定义，否则其值为 $null
+# 导致 Substring(0, $null) = 空串，正文只剩省略号（历史 bug 根因）
+$MAX_CHARS = 50
+
+# 提取摘要：去 markdown 符号、压缩空白、截断 $MAX_CHARS 字
 function Get-Summary {
     param([string]$t)
     if (-not $t) { return "" }
@@ -69,6 +73,26 @@ function Get-Summary {
     $clean = $clean.Trim()
     if ($clean.Length -gt $MAX_CHARS) { $clean = $clean.Substring(0, $MAX_CHARS) + "…" }
     return $clean
+}
+
+# 按可用宽度折行：Label 只有 Text 含换行符时才显示多行
+function Format-Body {
+    param([string]$t, [int]$maxWidth, [System.Drawing.Font]$font)
+    if (-not $t) { return "" }
+    $result = ""
+    $line = ""
+    foreach ($ch in $t.ToCharArray()) {
+        $test = $line + $ch
+        $w = [System.Windows.Forms.TextRenderer]::MeasureText($test, $font).Width
+        if ($w -gt $maxWidth -and $line) {
+            $result += $line + "`n"
+            $line = $ch
+        } else {
+            $line = $test
+        }
+    }
+    $result += $line
+    return $result
 }
 
 # =============================================================
@@ -153,7 +177,6 @@ $BODY_TOP = [int](34 * $scale)  # 正文上边距
 $BODY_H = [int](60 * $scale)    # 正文区域高度
 $F_TITLE = 8 * $scale           # 标题字号 (pt)
 $F_BODY = 7 * $scale            # 正文字号 (pt)
-$MAX_CHARS = 50                 # 摘要截断长度 (字)
 $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 
 $form = New-Object System.Windows.Forms.Form
@@ -185,8 +208,8 @@ $lblTitle.BackColor = $form.BackColor
 $lblBody = New-Object System.Windows.Forms.Label
 $lblBody.Location = [System.Drawing.Point]::new($PAD_X, $BODY_TOP)
 $lblBody.Size = [System.Drawing.Size]::new($W - 2 * $PAD_X, $BODY_H)
-$lblBody.Text = $bodyText
 $lblBody.Font = [System.Drawing.Font]::new("Segoe UI", $F_BODY)
+$lblBody.Text = Format-Body -t $bodyText -maxWidth ($W - 2 * $PAD_X) -font $lblBody.Font
 $lblBody.ForeColor = [System.Drawing.Color]::FromArgb(51, 51, 51)   # 深灰黑正文
 $lblBody.BackColor = $form.BackColor
 
