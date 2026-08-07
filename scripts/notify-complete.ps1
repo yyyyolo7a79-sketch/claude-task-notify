@@ -76,20 +76,21 @@ function Get-LastAssistantFromTranscript {
 }
 
 # 启发式判断：是否需要用户提供相关信息
-# 第三轮审查修复：
-#   ① skill 收尾标记：只识别**行首**标记（`✅ 已完成` / `❓ 需要你提供`），
-#      且取**最后一行**匹配——正文中出现示例文本不再误导判断
+# 第四轮审查修复：
+#   ① skill 收尾标记：先删代码块（块内标记不生效），然后只检查**最后一个非空
+#      文本行**是否为行首收尾标记——较早的示例/说明行不覆盖后续真实请求
 #   ② 排除礼貌性追问（"需要我…吗？"），避免可选优化询问误判为阻塞性请求
 #   ③ 兜底启发式只分析最后一段（完成句常以"请检查结果"收尾，全文搜索会误判）；
 #      请求词只保留明确请求句式
 function Test-NeedInfo {
     param([string]$t)
     if (-not $t) { return $false }
-    # ① skill 收尾标记：行首识别，取最后一行匹配（修复示例文本误导）
-    $markers = @($t -split '\r?\n' | Where-Object { $_ -match '^\s*(❓\s*需要你提供|✅\s*已完成)' })
-    if ($markers.Count -gt 0) {
-        if ($markers[-1] -match '^\s*❓') { return $true }
-        if ($markers[-1] -match '^\s*✅') { return $false }
+    # ① skill 收尾标记：删代码块 → 取最后一个非空行 → 判断是否为行首标记
+    $cleanT = [regex]::Replace($t, '```[\s\S]*?```', ' ')
+    $lastLine = ($cleanT -split '\r?\n' | Where-Object { $_.Trim() } | Select-Object -Last 1)
+    if ($lastLine) {
+        if ($lastLine -match '^\s*❓\s*需要你提供') { return $true }
+        if ($lastLine -match '^\s*✅\s*已完成') { return $false }
     }
     # ② 礼貌性追问排除："需要我继续优化吗？" → 不算阻塞性请求
     if ($t -match "需要我[^\r\n]{0,20}[吗么][?？]?\s*$") { return $false }
@@ -145,7 +146,9 @@ function Test-Dedupe {
         $got = $true    # Abandoned：锁已取得，稍后必须释放
     } catch { }
     if (-not $got) {
-        # fail-open：不去重（重复弹一次无害），不访问 state.json
+        # fail-open：不去重（重复弹一次无害），不访问 state.json；
+        # 第四轮审查修复：记录超时，便于线上区分"正常 fail-open"与"去重故障"
+        Write-NotifyLog "DEDUPE mutex-timeout"
         $mutex.Dispose()
         return $false
     }
@@ -154,7 +157,9 @@ function Test-Dedupe {
         if (Test-Path $STATE_FILE) {
             try {
                 $st = Get-Content -Raw $STATE_FILE -Encoding UTF8 | ConvertFrom-Json
-                if ($st.key -eq $key -and ($now - [DateTime]::Parse($st.ts)).TotalMilliseconds -lt $DEDUPE_MS) {
+                $elapsed = ($now - [DateTime]::Parse($st.ts)).TotalMilliseconds
+                # 第四轮审查修复：elapsed >= 0 防御时钟回拨/未来时间戳导致的异常抑制
+                if ($st.key -eq $key -and $elapsed -ge 0 -and $elapsed -lt $DEDUPE_MS) {
                     return $true
                 }
             } catch { }

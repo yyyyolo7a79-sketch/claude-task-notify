@@ -4,7 +4,7 @@
 # 职责：
 #   1. 读取 payload 文件（-PayloadFile），读取后立即删除
 #   2. WPF（DirectWrite）渲染右下角非模态卡片弹窗
-#   3. 8 秒自动淡出；点击卡片 / 右上角 ✕ / Esc 立即关闭
+#   3. hold 8 秒后淡出；点击卡片 / 右上角 ✕ 立即关闭（无 Esc——无焦点窗口收不到键盘）
 #
 # 不抢焦点：ShowActivated=false；不阻塞：独立进程管理 UI 生命周期
 #
@@ -64,24 +64,27 @@ $emoji = "✅"; $titleText = "任务完成"; $bodyText = "任务已完成，等�
 
 # 审查修复：路径约束——只接受 %TEMP%\claude-code-notify\payload-<32hex>.json，
 # 防止脚本被误调用时删除任意 JSON 文件
-$payloadOk = $false
+# 第四轮审查修复：校验通过后统一使用规范化路径 $payloadPath（读取与删除一致）；
+#   $DIR 也先 GetFullPath 再构造前缀（防环境变量含相对片段导致校验语义不一致）
+$payloadPath = ""
 if ($PayloadFile) {
     try {
+        $dirFull = [IO.Path]::GetFullPath($DIR)
         $full = [IO.Path]::GetFullPath($PayloadFile)
-        $prefix = $DIR.TrimEnd('\') + '\'
+        $prefix = $dirFull.TrimEnd('\') + '\'
         if ($full.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) -and
             [IO.Path]::GetFileName($full) -match '^payload-[0-9a-f]{32}\.json$') {
-            $payloadOk = $true
+            $payloadPath = $full
         }
     } catch { }
 }
-if (-not $payloadOk) {
+if (-not $payloadPath) {
     Write-NotifyLog "UI payload-rejected"
     exit 1   # 校验不通过：不读取也不删除任何文件
 }
 
 try {
-    $p = Get-Content -Raw $PayloadFile -Encoding UTF8 | ConvertFrom-Json
+    $p = Get-Content -Raw $payloadPath -Encoding UTF8 | ConvertFrom-Json
     if ($p.emoji) { $emoji = $p.emoji }
     if ($p.title) { $titleText = $p.title }
     if ($p.body) { $bodyText = $p.body }
@@ -90,7 +93,7 @@ try {
 } catch {
     Write-NotifyLog "UI payload-invalid"
 } finally {
-    Remove-Item $PayloadFile -Force -ErrorAction SilentlyContinue
+    Remove-Item $payloadPath -Force -ErrorAction SilentlyContinue
 }
 
 # =============================================================
@@ -134,8 +137,15 @@ public static class Win32Ext {
     }
 }
 "@
-# PER_MONITOR_AWARE_V2 = -4：必须在任何 WPF 窗口创建之前调用（失败则回退 system-aware，可接受）
-try { $null = [Win32Ext]::SetProcessDpiAwarenessContext([IntPtr](-4)) } catch { }
+# PER_MONITOR_AWARE_V2 = -4：必须在任何 WPF 窗口创建之前调用
+# 第四轮审查修复：失败不静默——记录日志并明确回退 system-aware（混合 DPI 可能不准）
+try {
+    if (-not [Win32Ext]::SetProcessDpiAwarenessContext([IntPtr](-4))) {
+        Write-NotifyLog "UI pmv2-failed-system-fallback"
+    }
+} catch {
+    Write-NotifyLog "UI pmv2-error"
+}
 $GWL_EXSTYLE = -20
 $WS_EX_NOACTIVATE = 0x08000000
 $WS_EX_TOOLWINDOW = 0x00000080
@@ -290,42 +300,67 @@ try {
     $null = $win.Show()
     $hwnd = (New-Object System.Windows.Interop.WindowInteropHelper($win)).Handle
 
-    # ① 叠加 WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW（Ptr API + 返回值检查）
+    # ① 叠加 WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW（Ptr API + 正确失败判断）
     $exOld = [Win32Ext]::GetWindowLongPtr64($hwnd, $GWL_EXSTYLE)
     $exNew = [IntPtr]($exOld.ToInt64() -bor $WS_EX_NOACTIVATE -bor $WS_EX_TOOLWINDOW)
+    [System.Runtime.InteropServices.Marshal]::SetLastWin32Error(0)
     $r1 = [Win32Ext]::SetWindowLongPtr64($hwnd, $GWL_EXSTYLE, $exNew)
-    if ($r1 -eq [IntPtr]::Zero) { Write-NotifyLog "UI style-apply-failed" }
+    # 第四轮审查修复：该 API 返回旧值（可能为零），只有"返回零且 last error 非零"才算失败
+    if ($r1 -eq [IntPtr]::Zero -and [System.Runtime.InteropServices.Marshal]::GetLastWin32Error() -ne 0) {
+        Write-NotifyLog "UI style-apply-failed"
+    }
     # 用 SWP_FRAMECHANGED | SWP_NOACTIVATE 刷新扩展样式（不移动、不激活）
-    $null = [Win32Ext]::SetWindowPos($hwnd, [IntPtr]::Zero, 0, 0, 0, 0,
-        ($SWP_FRAMECHANGED -bor $SWP_NOACTIVATE -bor $SWP_NOSIZE -bor $SWP_NOZORDER))
+    if (-not [Win32Ext]::SetWindowPos($hwnd, [IntPtr]::Zero, 0, 0, 0, 0,
+        ($SWP_FRAMECHANGED -bor $SWP_NOACTIVATE -bor $SWP_NOSIZE -bor $SWP_NOZORDER))) {
+        Write-NotifyLog "UI style-refresh-failed"
+    }
 
-    # ② 多显示器定位（第三轮审查修复）：
-    #    单次 GetCursorPos（避免两次调用间鼠标跨屏）→ 同一 HMONITOR 的
-    #    GetMonitorInfo 取工作区 + GetDpiForMonitor 取目标屏 DPI（失败回退 96）
+    # ② 多显示器定位（第四轮审查修复）：
+    #    全链路失败检查——GetCursorPos / MonitorFromPoint / GetMonitorInfo 任一失败
+    #    则跳过 SetWindowPos（保留 WPF 初始位置），绝不使用未初始化/全零数据计算
+    #    坐标（否则窗口会被移出屏幕）
+    $posOk = $true
     $pt = New-Object Win32Ext+POINT
-    $null = [Win32Ext]::GetCursorPos([ref]$pt)
-    $hMon = [Win32Ext]::MonitorFromPoint($pt, $MONITOR_DEFAULTTONEAREST)
+    if (-not [Win32Ext]::GetCursorPos([ref]$pt)) {
+        $posOk = $false
+        Write-NotifyLog "UI cursorpos-failed"
+    }
+    $hMon = [IntPtr]::Zero
+    if ($posOk) {
+        $hMon = [Win32Ext]::MonitorFromPoint($pt, $MONITOR_DEFAULTTONEAREST)
+        if ($hMon -eq [IntPtr]::Zero) {
+            $posOk = $false
+            Write-NotifyLog "UI monitor-failed"
+        }
+    }
     $mi = New-Object Win32Ext+MONITORINFO
-    $mi.cbSize = [System.Runtime.InteropServices.Marshal]::SizeOf($mi)
-    if (-not [Win32Ext]::GetMonitorInfo($hMon, [ref]$mi)) {
-        Write-NotifyLog "UI monitor-info-failed"
+    if ($posOk) {
+        $mi.cbSize = [System.Runtime.InteropServices.Marshal]::SizeOf($mi)
+        if (-not [Win32Ext]::GetMonitorInfo($hMon, [ref]$mi)) {
+            $posOk = $false
+            Write-NotifyLog "UI monitor-info-failed"
+        }
     }
     $dpiX = 96; $dpiY = 96
-    $hr = [Win32Ext]::GetDpiForMonitor($hMon, $MDT_EFFECTIVE_DPI, [ref]$dpiX, [ref]$dpiY)
-    if ($hr -ne 0 -or $dpiX -le 0 -or $dpiY -le 0) {
-        # DPI 查询失败：回退 96（WPF 默认），窗口尺寸按 1.0 计算
-        $dpiX = 96; $dpiY = 96
-        Write-NotifyLog "UI dpi-fallback-96"
+    if ($posOk) {
+        $hr = [Win32Ext]::GetDpiForMonitor($hMon, $MDT_EFFECTIVE_DPI, [ref]$dpiX, [ref]$dpiY)
+        if ($hr -ne 0 -or $dpiX -le 0 -or $dpiY -le 0) {
+            # DPI 查询失败：回退 96 不阻断定位（窗口尺寸按 1.0 计算）
+            $dpiX = 96; $dpiY = 96
+            Write-NotifyLog "UI dpi-fallback-96"
+        }
     }
-    $targetScale = $dpiX / 96.0
-    $winPhysW = [int](($W + 2 * $SHADOW_PAD) * $targetScale)
-    $winPhysH = [int](($H + 2 * $SHADOW_PAD) * $targetScale)
-    $marginPx = [int]($MARGIN * $targetScale)
-    $x = $mi.rcWork.R - $winPhysW - $marginPx
-    $y = $mi.rcWork.B - $winPhysH - $marginPx
-    if (-not [Win32Ext]::SetWindowPos($hwnd, [IntPtr]::Zero, $x, $y, $winPhysW, $winPhysH,
-        ($SWP_NOACTIVATE -bor $SWP_NOZORDER))) {
-        Write-NotifyLog "UI position-failed"
+    if ($posOk) {
+        $targetScale = $dpiX / 96.0
+        $winPhysW = [int](($W + 2 * $SHADOW_PAD) * $targetScale)
+        $winPhysH = [int](($H + 2 * $SHADOW_PAD) * $targetScale)
+        $marginPx = [int]($MARGIN * $targetScale)
+        $x = $mi.rcWork.R - $winPhysW - $marginPx
+        $y = $mi.rcWork.B - $winPhysH - $marginPx
+        if (-not [Win32Ext]::SetWindowPos($hwnd, [IntPtr]::Zero, $x, $y, $winPhysW, $winPhysH,
+            ($SWP_NOACTIVATE -bor $SWP_NOZORDER))) {
+            Write-NotifyLog "UI position-failed"
+        }
     }
 
     $animTimer.Start()
