@@ -132,11 +132,11 @@ Copy-Item skills\claude-task-notify "$HOME\.claude\skills\" -Recurse
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `$W` / `$H` | 380 / 150 | 卡片宽度 / 高度（px，100% DPI 基准，自动按系统缩放） |
-| `$PAD_X` / `$PAD_TOP` | 20 / 14 | 标题左边距 / 上边距 |
-| `$BODY_TOP` / `$BODY_H` | 34 / 60 | 正文上边距 / 正文区域高度 |
-| `$F_TITLE` / `$F_BODY` | 8 / 7 | 标题 / 正文字号（pt） |
-| `$MAX_CHARS` | 50 | 摘要截断长度（字） |
+| `$W` / `$H` | 400 / 200 | 卡片宽度 / 高度（px，100% DPI 基准，自动按系统缩放） |
+| `$PAD_X` / `$PAD_TOP` | 20 / 15 | 标题左边距 / 上边距 |
+| `$BODY_TOP` / `$BODY_H` | 52 / 80 | 正文上边距 / 正文区域高度 |
+| `$F_TITLE` / `$F_BODY` | 12 / 10（脚本内 `* 1.3333`） | 标题 / 正文字号（pt；WPF FontSize 单位是 DIP px，pt→px ×4/3） |
+| `$MAX_CHARS` | 50 | 摘要截断长度（字）——在 `notify-complete.ps1` 顶部，不在 show-popup |
 | `$MARGIN` | 20 | 弹窗距屏幕右下角边距 |
 
 ## 🧪 手动测试
@@ -145,7 +145,7 @@ Copy-Item skills\claude-task-notify "$HOME\.claude\skills\" -Recurse
 # 直接测入口（stdin 喂 Stop 事件 JSON，应快速返回并弹出卡片）
 $evt = @{ session_id="test"; cwd=(Get-Location).Path; hook_event_name="Stop";
           stop_hook_active=$false; last_assistant_message="弹窗工作正常" } | ConvertTo-Json
-$evt | powershell -NoProfile -ExecutionPolicy Bypass -File "$HOME\.claude\scripts\notify-complete.ps1"
+$evt | & "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "$HOME\.claude\scripts\notify-complete.ps1"
 ```
 
 测试结果可在日志确认：`%TEMP%\claude-code-notify\notify.log`（`OK` = 已通知，`DEDUPE` = 去重，`SKIP` = 被过滤）。

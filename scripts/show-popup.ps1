@@ -44,16 +44,39 @@ $F_BODY = 10 * 1.3333      # 正文（≈10pt）
 $SHADOW_PAD = 30           # 阴影边距（窗口比卡片大一圈，否则阴影被裁剪）
 $DURATION_MS = 8000        # 显示时长 8 秒（规格 3.2）
 
-# 脱敏日志（与入口共用）
+# 脱敏日志（与入口共用同一文件；实现与 notify-complete.ps1 保持同步）
+# 第六轮审查修复：命名 Mutex 串行化「检查→滚动→追加」；滚动用 SetLength(0) 截断
+#   （不删除文件，避免另一进程已打开句柄失效）；超时 fail-open 直接追加
 function Write-NotifyLog {
     param([string]$msg)
     try {
         if (-not (Test-Path $DIR)) { $null = New-Item -ItemType Directory -Force $DIR }
-        if ((Test-Path $LOG_FILE) -and (Get-Item $LOG_FILE).Length -gt $LOG_MAX) {
-            Remove-Item $LOG_FILE -Force
+        $line = ("[{0}] {1}`r`n" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $msg)
+        $mutex = New-Object System.Threading.Mutex($false, 'Local\ClaudeCodeNotifyLog')
+        $got = $false
+        try {
+            $got = $mutex.WaitOne(100)
+        } catch [System.Threading.AbandonedMutexException] {
+            $got = $true    # Abandoned：锁已取得，稍后必须释放
+        } catch { }
+        try {
+            if ($got) {
+                $fs = [IO.File]::Open($LOG_FILE, [IO.FileMode]::OpenOrCreate,
+                    [IO.FileAccess]::ReadWrite, [IO.FileShare]::ReadWrite)
+                try {
+                    if ($fs.Length -gt $LOG_MAX) { $fs.SetLength(0) }
+                    # ⚠️ Open() 后文件指针在 0，必须 Seek 到末尾再写（否则从开头覆盖历史日志）
+                    $null = $fs.Seek(0, [IO.SeekOrigin]::End)
+                    $bytes = [System.Text.Encoding]::UTF8.GetBytes($line)
+                    $fs.Write($bytes, 0, $bytes.Length)
+                } finally { $fs.Close() }
+            } else {
+                [System.IO.File]::AppendAllText($LOG_FILE, $line)   # fail-open：单次追加
+            }
+        } finally {
+            if ($got) { try { $mutex.ReleaseMutex() } catch { } }
+            $mutex.Dispose()
         }
-        ("[{0}] {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $msg) |
-            Out-File $LOG_FILE -Append -Encoding UTF8
     } catch { }
 }
 
@@ -108,7 +131,7 @@ Add-Type -AssemblyName System.Xaml
 # 第三轮审查修复：
 #   - SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)：进程默认 system-aware，
 #     MDT_EFFECTIVE_DPI 会返回系统 DPI 而非目标屏 DPI；必须在创建任何窗口前声明
-#   - SetLastError=true + 返回值检查 + DPI fallback（查询失败回退 96）
+#   - SetLastError=true + 返回值检查；DPI 查询失败 → 跳过定位保留初始位置（第五轮审查，不再回退 96）
 #   - 定位全程使用同一 HMONITOR（单次 GetCursorPos → MonitorFromPoint → GetMonitorInfo/GetDpiForMonitor）
 Add-Type @"
 using System;
@@ -188,7 +211,8 @@ $win.Topmost = $true
 $win.ShowInTaskbar = $false
 $win.ShowActivated = $false          # 不激活，不抢焦点（WS_EX_NOACTIVATE 在 Show 后叠加）
 $win.Opacity = 0.0
-# 初始位置（Show 后会被 SetWindowPos 按鼠标所在屏幕精确覆盖）
+# 初始位置（Show 后通常被 SetWindowPos 按鼠标所在屏幕精确覆盖；
+#   定位链任一环节失败时保留此位置——系统按主屏工作区计算，可用）
 $wa = [System.Windows.SystemParameters]::WorkArea
 $win.Left = $wa.Right - $W - $MARGIN - $SHADOW_PAD
 $win.Top = $wa.Bottom - $H - $MARGIN - $SHADOW_PAD

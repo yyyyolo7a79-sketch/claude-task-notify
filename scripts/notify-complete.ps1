@@ -25,6 +25,7 @@ $LOG_FILE = "$DIR\notify.log"
 $LOG_MAX = 200KB
 $DEDUPE_MS = 2000      # 去重窗口
 $PAYLOAD_TTL = 10      # payload 清理阈值（分钟）
+$MAX_CHARS = 50        # 摘要截断长度（字；与弹窗参数调整器的 MAX_CHARS 滑块对应）
 # 可移植路径：UI 脚本与入口同目录（$PSScriptRoot），解释器用绝对路径（防 PATH 劫持）
 $SHOW_POPUP = Join-Path $PSScriptRoot 'show-popup.ps1'
 $PS_EXE = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
@@ -34,15 +35,40 @@ $PS_EXE = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
 # =============================================================
 
 # 脱敏日志：只记时间/事件/会话前 8 位/结果/异常类型，禁止记录全文
+# 第六轮审查修复：入口与 UI 进程共写同一 notify.log，原 Out-File -Append 无锁 +
+#   各自删除超限文件 → 并发时丢日志。改为：命名 Mutex 串行化「检查→滚动→追加」，
+#   滚动用 SetLength(0) 截断（不删除文件——避免另一进程已打开句柄失效）；
+#   超时 fail-open 直接追加（单次写，不阻塞）。
 function Write-NotifyLog {
     param([string]$msg)
     try {
         if (-not (Test-Path $DIR)) { $null = New-Item -ItemType Directory -Force $DIR }
-        if ((Test-Path $LOG_FILE) -and (Get-Item $LOG_FILE).Length -gt $LOG_MAX) {
-            Remove-Item $LOG_FILE -Force
+        $line = ("[{0}] {1}`r`n" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $msg)
+        $mutex = New-Object System.Threading.Mutex($false, 'Local\ClaudeCodeNotifyLog')
+        $got = $false
+        try {
+            $got = $mutex.WaitOne(100)
+        } catch [System.Threading.AbandonedMutexException] {
+            $got = $true    # Abandoned：锁已取得，稍后必须释放
+        } catch { }
+        try {
+            if ($got) {
+                $fs = [IO.File]::Open($LOG_FILE, [IO.FileMode]::OpenOrCreate,
+                    [IO.FileAccess]::ReadWrite, [IO.FileShare]::ReadWrite)
+                try {
+                    if ($fs.Length -gt $LOG_MAX) { $fs.SetLength(0) }
+                    # ⚠️ Open() 后文件指针在 0，必须 Seek 到末尾再写（否则从开头覆盖历史日志）
+                    $null = $fs.Seek(0, [IO.SeekOrigin]::End)
+                    $bytes = [System.Text.Encoding]::UTF8.GetBytes($line)
+                    $fs.Write($bytes, 0, $bytes.Length)
+                } finally { $fs.Close() }
+            } else {
+                [System.IO.File]::AppendAllText($LOG_FILE, $line)   # fail-open：单次追加
+            }
+        } finally {
+            if ($got) { try { $mutex.ReleaseMutex() } catch { } }
+            $mutex.Dispose()
         }
-        ("[{0}] {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $msg) |
-            Out-File $LOG_FILE -Append -Encoding UTF8
     } catch { }
 }
 
@@ -125,7 +151,7 @@ function Get-Summary {
     if ($paras.Count -gt 0) { $clean = $paras[0] }
     $clean = $clean -replace '\s+', ' '
     $clean = $clean.Trim()
-    if ($clean.Length -gt 50) { $clean = $clean.Substring(0, 50) + "…" }
+    if ($clean.Length -gt $MAX_CHARS) { $clean = $clean.Substring(0, $MAX_CHARS) + "…" }
     return $clean
 }
 

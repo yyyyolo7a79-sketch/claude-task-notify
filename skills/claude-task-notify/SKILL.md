@@ -32,7 +32,7 @@ Claude Code 每次停止响应（任务回合结束）时，Windows 右下角自
 ```powershell
 $evt = @{ session_id="test"; cwd=(Get-Location).Path; hook_event_name="Stop";
           stop_hook_active=$false; last_assistant_message="弹窗工作正常" } | ConvertTo-Json
-$evt | powershell -NoProfile -ExecutionPolicy Bypass -File "$HOME\.claude\scripts\notify-complete.ps1"
+$evt | & "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "$HOME\.claude\scripts\notify-complete.ps1"
 ```
 
 - 结尾带「请提供…」→ ❓ 需要用户提供相关信息；正常结尾 → ✅ 任务完成
