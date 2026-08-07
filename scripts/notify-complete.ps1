@@ -25,7 +25,7 @@ $LOG_FILE = "$DIR\notify.log"
 $LOG_MAX = 200KB
 $DEDUPE_MS = 2000      # 去重窗口
 $PAYLOAD_TTL = 10      # payload 清理阈值（分钟）
-$MAX_CHARS = 50        # 摘要截断长度（字；与弹窗参数调整器的 MAX_CHARS 滑块对应）
+$MAX_CHARS = 180       # 摘要截断长度（字；与弹窗参数调整器的 MAX_CHARS 滑块对应）
 # 可移植路径：UI 脚本与入口同目录（$PSScriptRoot），解释器用绝对路径（防 PATH 劫持）
 $SHOW_POPUP = Join-Path $PSScriptRoot 'show-popup.ps1'
 $PS_EXE = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'

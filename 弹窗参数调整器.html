@@ -81,7 +81,7 @@
   <div class="row"><div class="lab"><span>标题上边距 PAD_TOP</span><span class="val" id="v-pt">15</span></div><input type="range" id="p-pt" min="6" max="40" step="1" value="15"></div>
   <div class="row"><div class="lab"><span>正文上边距 BODY_TOP（含项目名行）</span><span class="val" id="v-bt">52</span></div><input type="range" id="p-bt" min="30" max="140" step="1" value="52"></div>
   <div class="row"><div class="lab"><span>正文区域高度 BODY_H</span><span class="val" id="v-bh">80</span></div><input type="range" id="p-bh" min="20" max="180" step="2" value="80"></div>
-  <div class="row"><div class="lab"><span>摘要截断长度（字，对应 notify-complete.ps1）</span><span class="val" id="v-mc">50</span></div><input type="range" id="p-mc" min="20" max="120" step="5" value="50"></div>
+  <div class="row"><div class="lab"><span>摘要截断长度（字，对应 notify-complete.ps1）</span><span class="val" id="v-mc">180</span></div><input type="range" id="p-mc" min="20" max="200" step="5" value="180"></div>
 
   <div class="tip" style="margin-top:10px; color:#c0392b;">提示：系统缩放应与你电脑的显示缩放一致（可在 设置→显示 查看，本机 150%）。预览按「基准值 × 系统缩放 ÷ 浏览器缩放」渲染，与真实弹窗像素级一致。</div>
 </div>
@@ -108,7 +108,7 @@
 
 <script>
   // 模拟正文（两种场景轮换展示，点击卡片切换）
-  var SAMPLE_NEED = "请提供报错日志，我才能定位问题。建议同时附上运行环境与操作步骤，方便快速排查原因，我会给出修复方案。";
+  var SAMPLE_NEED = "请提供报错日志，我才能定位问题。建议同时附上运行环境与操作步骤，方便快速排查原因，我会给出修复方案。请提供报错日志，我才能定位问题。建议同时附上运行环境与操作步骤，方便快速排查原因，我会给出修复方案。请提供报错日志，我才能定位问题。建议同时附上运行环境与操作步骤，方便快速排查原因，我会给出修复方案。";
   var SAMPLE_DONE = "已完成所有修改，共改动 3 个文件，测试全部通过。后续如需部署，请告诉我目标环境信息，我会给出完整命令。";
   var mode = 0;
 

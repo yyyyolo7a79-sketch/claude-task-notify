@@ -6,7 +6,7 @@
 
 - **强制生效**：由 Claude Code 的 `Stop` hook 触发（harness 层执行），每次 Claude 停止响应必然弹窗，不依赖模型自觉
 - **智能反馈**：自动分析本次回复——以问号结尾或包含请求词（"请提供…""需要你…"）→ ❓「需要用户提供相关信息」；否则 → ✅「任务完成」
-- **回复摘要**：正文显示本次回复首句（默认截断 50 字），自动清洗代码块/HTML 标签/实体/emoji/URL，不切回终端也能知道 Claude 说了什么
+- **回复摘要**：正文显示本次回复首句（默认截断 180 字），自动清洗代码块/HTML 标签/实体/emoji/URL，不切回终端也能知道 Claude 说了什么
 - **项目名**：标题旁显示当前项目目录名，多项目同时运行时一眼区分
 - **全局生效**：配置在用户级 `~/.claude/settings.json`，对所有项目生效
 - **零第三方依赖**：仅用系统自带的 PowerShell 5.1 + WPF（DirectWrite 渲染，文字与浏览器同源清晰），无需安装任何模块
@@ -136,7 +136,7 @@ Copy-Item skills\claude-task-notify "$HOME\.claude\skills\" -Recurse
 | `$PAD_X` / `$PAD_TOP` | 20 / 15 | 标题左边距 / 上边距 |
 | `$BODY_TOP` / `$BODY_H` | 52 / 80 | 正文上边距 / 正文区域高度 |
 | `$F_TITLE` / `$F_BODY` | 12 / 10（脚本内 `* 1.3333`） | 标题 / 正文字号（pt；WPF FontSize 单位是 DIP px，pt→px ×4/3） |
-| `$MAX_CHARS` | 50 | 摘要截断长度（字）——在 `notify-complete.ps1` 顶部，不在 show-popup |
+| `$MAX_CHARS` | 180 | 摘要截断长度（字）——在 `notify-complete.ps1` 顶部，不在 show-popup |
 | `$MARGIN` | 20 | 弹窗距屏幕右下角边距 |
 
 ## 🧪 手动测试
