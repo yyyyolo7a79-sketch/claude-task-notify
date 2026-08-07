@@ -76,11 +76,20 @@ function Get-LastAssistantFromTranscript {
 }
 
 # 启发式判断：是否需要用户提供相关信息
-# 注意：只分析最后一段（完成句常以"请检查结果"等收尾，全文搜索会误判）；
-#       请求词只保留明确请求句式，去掉完成句中常见的 检查/说明/给出/回复/分享
+# 审查修复：
+#   ① 优先识别 skill 约定的收尾标记（✅ 已完成：/ ❓ 需要你提供：）——格式即答案，不再启发式
+#   ② 排除礼貌性追问（"需要我…吗？"），避免可选优化询问误判为阻塞性请求
+#   ③ 兜底启发式只分析最后一段（完成句常以"请检查结果"收尾，全文搜索会误判）；
+#      请求词只保留明确请求句式
 function Test-NeedInfo {
     param([string]$t)
     if (-not $t) { return $false }
+    # ① skill 收尾标记优先（格式即答案）
+    if ($t -match "❓\s*需要你提供") { return $true }
+    if ($t -match "✅\s*已完成") { return $false }
+    # ② 礼貌性追问排除："需要我继续优化吗？" → 不算阻塞性请求
+    if ($t -match "需要我[^\r\n]{0,20}[吗么][?？]?\s*$") { return $false }
+    # ③ 兜底启发式（只分析最后一段）
     $paras = @($t -split '(\r?\n\s*){1,}' | Where-Object { $_.Trim() })
     if ($paras.Count -gt 0) { $t = $paras[$paras.Count - 1] }
     $t = $t.Trim()
@@ -104,6 +113,8 @@ function Get-Summary {
     $clean = $clean -replace '&[a-zA-Z#0-9]{1,8};', ' '
     $clean = [regex]::Replace($clean, '(?m)^#+\s*', '')              # multiline 标题
     $clean = [regex]::Replace($clean, '(?m)^\s*[-*+]\s*', '')        # multiline 列表
+    # 审查修复：普通 Markdown 链接先替换为链接文字（否则 URL 删除后残留 "[报告]("）
+    $clean = [regex]::Replace($clean, '\[([^\]]*)\]\((https?://[^)\s]+)\)', '$1')
     $clean = $clean -replace 'https?://[^\s]+', ''                   # URL 后删
     $paras = @($clean -split '(\r?\n\s*){2,}' | Where-Object { $_.Trim() })
     if ($paras.Count -gt 0) { $clean = $paras[0] }
@@ -113,28 +124,37 @@ function Get-Summary {
     return $clean
 }
 
-# 2 秒去重：同一 (session, 回复) 在窗口内只通知一次；原子替换避免并发损坏
+# 2 秒去重：同一 (session, 回复) 在窗口内只通知一次
+# 审查修复：读-判-写整体包在命名 Mutex 内，多个实例并发时串行化
+#   （GUID 临时名只避免文件互相覆盖，不能解决"同时读到旧状态"的竞态）
 function Test-Dedupe {
     param([string]$key)
     $now = [DateTime]::UtcNow
-    if (Test-Path $STATE_FILE) {
-        try {
-            $st = Get-Content -Raw $STATE_FILE -Encoding UTF8 | ConvertFrom-Json
-            if ($st.key -eq $key -and ($now - [DateTime]::Parse($st.ts)).TotalMilliseconds -lt $DEDUPE_MS) {
-                return $true
-            }
-        } catch { }
-    }
-    # 原子写：先写临时文件再 Move（避免并发写损坏）
+    $mutex = New-Object System.Threading.Mutex($false, 'Local\ClaudeCodeNotifyDedupe')
+    $got = $false
+    try { $got = $mutex.WaitOne(2000) } catch { }
     try {
-        if (-not (Test-Path $DIR)) { $null = New-Item -ItemType Directory -Force $DIR }
-        # GUID 临时名：多个实例并发时互不覆盖（固定 .tmp 名会互相踩踏）
-        $tmp = "$STATE_FILE.tmp-" + [Guid]::NewGuid().ToString("N")
-        @{ key = $key; ts = $now.ToString("o") } | ConvertTo-Json |
-            Set-Content $tmp -Encoding UTF8
-        Move-Item -Force $tmp $STATE_FILE
-    } catch { }
-    return $false
+        if (Test-Path $STATE_FILE) {
+            try {
+                $st = Get-Content -Raw $STATE_FILE -Encoding UTF8 | ConvertFrom-Json
+                if ($st.key -eq $key -and ($now - [DateTime]::Parse($st.ts)).TotalMilliseconds -lt $DEDUPE_MS) {
+                    return $true
+                }
+            } catch { }
+        }
+        # 原子写：先写 GUID 临时文件再 Move（避免并发写损坏）
+        try {
+            if (-not (Test-Path $DIR)) { $null = New-Item -ItemType Directory -Force $DIR }
+            $tmp = "$STATE_FILE.tmp-" + [Guid]::NewGuid().ToString("N")
+            @{ key = $key; ts = $now.ToString("o") } | ConvertTo-Json |
+                Set-Content $tmp -Encoding UTF8
+            Move-Item -Force $tmp $STATE_FILE
+        } catch { }
+        return $false
+    } finally {
+        if ($got) { try { $mutex.ReleaseMutex() } catch { } }
+        $mutex.Dispose()
+    }
 }
 
 # 清理超过 10 分钟未被 UI 读取的旧 payload
@@ -151,6 +171,8 @@ function Clear-StalePayloads {
 # =============================================================
 # 主流程
 # =============================================================
+$sw = [System.Diagnostics.Stopwatch]::StartNew()   # 入口耗时（审查建议：毫秒级验证 500ms）
+
 $stdinJson = ""
 if ([Console]::IsInputRedirected) {
     try { $stdinJson = [Console]::In.ReadToEnd() } catch { }
@@ -175,11 +197,11 @@ if ($data.stop_hook_active) {
     Write-NotifyLog ("SKIP stop_hook_active sid=" + ($data.session_id -replace '(.{8}).*', '$1'))
     exit 0
 }
-if ($data.background_tasks -and @($data.background_tasks).Count -gt 0) {
-    # 后台任务仍在运行：主回复虽结束但任务未完成，不弹"任务完成"（避免误导）
-    Write-NotifyLog ("SKIP background_tasks sid=" + ($data.session_id -replace '(.{8}).*', '$1'))
-    exit 0
-}
+# 后台任务仍在运行时：不显示"任务完成"（避免误导），但也不跳过——
+# 后台任务结束后未必再次触发 Stop，跳过会导致永远没有通知。
+# 改为：标题显示"主回复完成"，并在日志标注 bg=1
+$hasBg = $false
+if ($data.background_tasks -and @($data.background_tasks).Count -gt 0) { $hasBg = $true }
 
 # 内容获取：优先 last_assistant_message，缺失则读 transcript 兜底
 $rawText = $data.last_assistant_message
@@ -193,6 +215,8 @@ $bodyText = Get-Summary -t $rawText
 $isNeedInfo = Test-NeedInfo -t $rawText
 if ($isNeedInfo) {
     $emoji = "❓"; $titleText = "需要用户提供相关信息"
+} elseif ($hasBg) {
+    $emoji = "⏳"; $titleText = "主回复完成，后台任务运行中"
 } else {
     $emoji = "✅"; $titleText = "任务完成"
 }
@@ -214,6 +238,7 @@ try {
         title      = $titleText
         body       = $bodyText
         project    = $project
+        background = $hasBg
         sessionId  = $data.session_id
         createdAt  = (Get-Date -Format "o")
     } | ConvertTo-Json | Set-Content $payloadFile -Encoding UTF8
@@ -237,8 +262,9 @@ try {
     exit 0
 }
 
-# 清理旧 payload + 日志
+# 清理旧 payload + 日志（dur 为入口实际耗时，验证 500ms 内返回）
 Clear-StalePayloads
-Write-NotifyLog ("OK adapter=wpf need_info=" + $isNeedInfo + " sid=" + ($data.session_id -replace '(.{8}).*', '$1'))
+Write-NotifyLog ("OK adapter=wpf need_info=" + $isNeedInfo + " bg=" + $hasBg +
+    " dur=" + $sw.ElapsedMilliseconds + "ms sid=" + ($data.session_id -replace '(.{8}).*', '$1'))
 
 exit 0

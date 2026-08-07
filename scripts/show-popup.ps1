@@ -62,21 +62,35 @@ function Write-NotifyLog {
 # =============================================================
 $emoji = "✅"; $titleText = "任务完成"; $bodyText = "任务已完成，等待你的下一步操作。"; $project = ""
 
-if (-not $PayloadFile -or -not (Test-Path $PayloadFile)) {
-    Write-NotifyLog "UI no-payload"
-} else {
+# 审查修复：路径约束——只接受 %TEMP%\claude-code-notify\payload-<32hex>.json，
+# 防止脚本被误调用时删除任意 JSON 文件
+$payloadOk = $false
+if ($PayloadFile) {
     try {
-        $p = Get-Content -Raw $PayloadFile -Encoding UTF8 | ConvertFrom-Json
-        if ($p.emoji) { $emoji = $p.emoji }
-        if ($p.title) { $titleText = $p.title }
-        if ($p.body) { $bodyText = $p.body }
-        if ($p.project) { $project = $p.project }
-        Write-NotifyLog "UI payload-ok"
-    } catch {
-        Write-NotifyLog "UI payload-invalid"
-    } finally {
-        Remove-Item $PayloadFile -Force -ErrorAction SilentlyContinue
-    }
+        $full = [IO.Path]::GetFullPath($PayloadFile)
+        $prefix = $DIR.TrimEnd('\') + '\'
+        if ($full.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) -and
+            [IO.Path]::GetFileName($full) -match '^payload-[0-9a-f]{32}\.json$') {
+            $payloadOk = $true
+        }
+    } catch { }
+}
+if (-not $payloadOk) {
+    Write-NotifyLog "UI payload-rejected"
+    exit 1   # 校验不通过：不读取也不删除任何文件
+}
+
+try {
+    $p = Get-Content -Raw $PayloadFile -Encoding UTF8 | ConvertFrom-Json
+    if ($p.emoji) { $emoji = $p.emoji }
+    if ($p.title) { $titleText = $p.title }
+    if ($p.body) { $bodyText = $p.body }
+    if ($p.project) { $project = $p.project }
+    Write-NotifyLog "UI payload-ok"
+} catch {
+    Write-NotifyLog "UI payload-invalid"
+} finally {
+    Remove-Item $PayloadFile -Force -ErrorAction SilentlyContinue
 }
 
 # =============================================================
@@ -89,13 +103,21 @@ Add-Type -AssemblyName System.Xaml
 Add-Type -AssemblyName System.Windows.Forms   # 仅用 Screen/Cursor 做多显示器定位
 
 # Win32：WS_EX_NOACTIVATE（点击不抢焦点）+ SetWindowPos（物理像素定位）
+# 审查修复：Get/SetWindowLongPtr（64位）；GetDpiForMonitor 取目标屏 DPI（混合 DPI 正确）
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
 public static class Win32Ext {
-    [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
-    [DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtr")]
+    public static extern IntPtr GetWindowLongPtr64(IntPtr hWnd, int nIndex);
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtr")]
+    public static extern IntPtr SetWindowLongPtr64(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+    [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT pt);
+    [DllImport("user32.dll")] public static extern IntPtr MonitorFromPoint(POINT pt, uint dwFlags);
+    [DllImport("shcore.dll")] public static extern int GetDpiForMonitor(IntPtr hMonitor, int dpiType, out uint dpiX, out uint dpiY);
+    [StructLayout(LayoutKind.Sequential)]
+    public struct POINT { public int X; public int Y; }
 }
 "@
 $GWL_EXSTYLE = -20
@@ -103,6 +125,10 @@ $WS_EX_NOACTIVATE = 0x08000000
 $WS_EX_TOOLWINDOW = 0x00000080
 $SWP_NOSIZE = 0x0001
 $SWP_NOZORDER = 0x0004
+$SWP_NOACTIVATE = 0x0010
+$SWP_FRAMECHANGED = 0x0020
+$MDT_EFFECTIVE_DPI = 0
+$MONITOR_DEFAULTTONEAREST = 2
 
 $app = New-Object System.Windows.Application
 
@@ -139,34 +165,44 @@ $border.Effect = $shadow
 $grid = New-Object System.Windows.Controls.Grid
 $border.Child = $grid
 
-# 标题行：StackPanel 横向 [标题 + 项目名（灰小字）]
-$stackTitle = New-Object System.Windows.Controls.StackPanel
-$stackTitle.Orientation = [System.Windows.Controls.Orientation]::Horizontal
-$stackTitle.Margin = [System.Windows.Thickness]::new($PAD_X, $PAD_TOP, 60, 0)
-$stackTitle.VerticalAlignment = [System.Windows.VerticalAlignment]::Top
-$stackTitle.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Left
+# 三列 Grid（审查修复）：标题(*) 可收缩省略 / 项目名(Auto) 截断 / ✕(Auto) 固定
+$colTitle = New-Object System.Windows.Controls.ColumnDefinition
+$colTitle.Width = [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star)
+$colProject = New-Object System.Windows.Controls.ColumnDefinition
+$colProject.Width = [System.Windows.GridLength]::Auto
+$colClose = New-Object System.Windows.Controls.ColumnDefinition
+$colClose.Width = [System.Windows.GridLength]::Auto
+$grid.ColumnDefinitions.Add($colTitle) | Out-Null
+$grid.ColumnDefinitions.Add($colProject) | Out-Null
+$grid.ColumnDefinitions.Add($colClose) | Out-Null
 
+# 标题（可收缩，长标题省略号）
 $tbTitle = New-Object System.Windows.Controls.TextBlock
 $tbTitle.Text = "$emoji  $titleText"
 $tbTitle.FontSize = $F_TITLE
 $tbTitle.FontWeight = [System.Windows.FontWeights]::Bold
 $tbTitle.Foreground = [System.Windows.Media.Brushes]::Black
-$tbTitle.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
-$stackTitle.Children.Add($tbTitle) | Out-Null
+$tbTitle.Margin = [System.Windows.Thickness]::new($PAD_X, $PAD_TOP, 4, 0)
+$tbTitle.VerticalAlignment = [System.Windows.VerticalAlignment]::Top
+$tbTitle.TextTrimming = [System.Windows.TextTrimming]::CharacterEllipsis
+[System.Windows.Controls.Grid]::SetColumn($tbTitle, 0)
+$grid.Children.Add($tbTitle) | Out-Null
 
+# 项目名（Auto 列，MaxWidth 截断）
 if ($project) {
     $tbProject = New-Object System.Windows.Controls.TextBlock
-    $tbProject.Text = "  ·  $project"
+    $tbProject.Text = "· $project"
     $tbProject.FontSize = $F_BODY * 0.85
     $tbProject.Foreground = [System.Windows.Media.Brushes]::Gray
-    $tbProject.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
-    $tbProject.MaxWidth = 140                     # 长项目名截断，避免覆盖 ✕
+    $tbProject.Margin = [System.Windows.Thickness]::new(0, $PAD_TOP + 2, 8, 0)
+    $tbProject.VerticalAlignment = [System.Windows.VerticalAlignment]::Top
+    $tbProject.MaxWidth = 140
     $tbProject.TextTrimming = [System.Windows.TextTrimming]::CharacterEllipsis
-    $stackTitle.Children.Add($tbProject) | Out-Null
+    [System.Windows.Controls.Grid]::SetColumn($tbProject, 1)
+    $grid.Children.Add($tbProject) | Out-Null
 }
-$grid.Children.Add($stackTitle) | Out-Null
 
-# 右上角 ✕ 关闭按钮
+# 右上角 ✕ 关闭按钮（固定列，绝不重叠）
 $btnClose = New-Object System.Windows.Controls.TextBlock
 $btnClose.Text = "✕"
 $btnClose.FontSize = $F_TITLE * 0.9
@@ -179,6 +215,7 @@ $btnClose.Add_MouseLeftButtonDown({
     $script:animTimer.Stop()
     $win.Close()
 })
+[System.Windows.Controls.Grid]::SetColumn($btnClose, 2)
 $grid.Children.Add($btnClose) | Out-Null
 
 # 正文摘要（自动换行 + 超长省略）
@@ -201,16 +238,11 @@ $win.Add_MouseLeftButtonDown({
     $script:animTimer.Stop()
     $win.Close()
 })
-$win.Add_KeyDown({
-    if ($_.Key -eq [System.Windows.Input.Key]::Escape) {
-        $script:animTimer.Stop()
-        $win.Close()
-    }
-})
-
 # ---- 动画：淡入 → 停留 8s → 淡出 ----
+# 审查修复：hold 用真实时间戳（DispatcherTimer 不保证每 20ms 调度，
+#   累计 tick 会把 8 秒拖成 15 秒——实测日志确认）
 $script:phase = "in"
-$script:holdTicks = 0
+$script:holdStart = [DateTime]::UtcNow
 
 $animTimer = New-Object System.Windows.Threading.DispatcherTimer
 $animTimer.Interval = [TimeSpan]::FromMilliseconds(20)
@@ -220,11 +252,12 @@ $animTimer.Add_Tick({
         if ($win.Opacity -ge 1.0) {
             $win.Opacity = 1.0
             $script:phase = "hold"
-            $script:holdTicks = 0
+            $script:holdStart = [DateTime]::UtcNow
         }
     } elseif ($script:phase -eq "hold") {
-        $script:holdTicks++
-        if ($script:holdTicks * 20 -ge $DURATION_MS) { $script:phase = "out" }
+        if (([DateTime]::UtcNow - $script:holdStart).TotalMilliseconds -ge $DURATION_MS) {
+            $script:phase = "out"
+        }
     } elseif ($script:phase -eq "out") {
         $win.Opacity -= 0.05
         if ($win.Opacity -le 0.0) {
@@ -238,25 +271,34 @@ $animTimer.Add_Tick({
 $win.Add_Closed({ $app.Shutdown() })
 try {
     $null = $win.Show()
-
-    # 叠加 WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW：点击也不激活，不抢焦点
     $hwnd = (New-Object System.Windows.Interop.WindowInteropHelper($win)).Handle
-    $ex = [Win32Ext]::GetWindowLong($hwnd, $GWL_EXSTYLE)
-    $null = [Win32Ext]::SetWindowLong($hwnd, $GWL_EXSTYLE, ($ex -bor $WS_EX_NOACTIVATE -bor $WS_EX_TOOLWINDOW))
 
-    # 多显示器：弹在鼠标所在屏幕的右下角（SetWindowPos 物理像素精确定位）
-    # ⚠️ WorkingArea 与 SetWindowPos 均为物理像素，偏移量必须 ×DPI scale 换算，
-    #    不能直接减 DIP 值（否则窗口被推出屏幕——历史 bug）
+    # ① 叠加 WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW（Ptr API + 失败检查）
+    $exOld = [Win32Ext]::GetWindowLongPtr64($hwnd, $GWL_EXSTYLE)
+    $exNew = [IntPtr]($exOld.ToInt64() -bor $WS_EX_NOACTIVATE -bor $WS_EX_TOOLWINDOW)
+    $null = [Win32Ext]::SetWindowLongPtr64($hwnd, $GWL_EXSTYLE, $exNew)
+    # 用 SWP_FRAMECHANGED | SWP_NOACTIVATE 刷新扩展样式（不移动、不激活）
+    $null = [Win32Ext]::SetWindowPos($hwnd, [IntPtr]::Zero, 0, 0, 0, 0,
+        ($SWP_FRAMECHANGED -bor $SWP_NOACTIVATE -bor $SWP_NOSIZE -bor $SWP_NOZORDER))
+
+    # ② 多显示器定位：鼠标所在屏幕（物理像素）
+    # 目标屏 DPI 用 GetDpiForMonitor 获取（不能读当前窗口所在屏的 TransformToDevice——
+    #   窗口仍在主屏时副屏 scale 会算错，混合 DPI 修复）
+    $pt = New-Object Win32Ext+POINT
+    $null = [Win32Ext]::GetCursorPos([ref]$pt)
+    $hMon = [Win32Ext]::MonitorFromPoint($pt, $MONITOR_DEFAULTTONEAREST)
+    $dpiX = 0; $dpiY = 0
+    $null = [Win32Ext]::GetDpiForMonitor($hMon, $MDT_EFFECTIVE_DPI, [ref]$dpiX, [ref]$dpiY)
+    $targetScale = $dpiX / 96.0
     $scr = [System.Windows.Forms.Screen]::FromPoint([System.Windows.Forms.Cursor]::Position)
     $wa2 = $scr.WorkingArea
-    $src = [System.Windows.PresentationSource]::FromVisual($win)
-    $m = $src.CompositionTarget.TransformToDevice
-    $winPhysW = [int](($W + 2 * $SHADOW_PAD) * $m.M11)
-    $winPhysH = [int](($H + 2 * $SHADOW_PAD) * $m.M22)
-    $marginPx = [int]($MARGIN * $m.M11)
+    $winPhysW = [int](($W + 2 * $SHADOW_PAD) * $targetScale)
+    $winPhysH = [int](($H + 2 * $SHADOW_PAD) * $targetScale)
+    $marginPx = [int]($MARGIN * $targetScale)
     $x = $wa2.Right - $winPhysW - $marginPx
     $y = $wa2.Bottom - $winPhysH - $marginPx
-    $null = [Win32Ext]::SetWindowPos($hwnd, [IntPtr]::Zero, $x, $y, $winPhysW, $winPhysH, $SWP_NOZORDER)
+    $null = [Win32Ext]::SetWindowPos($hwnd, [IntPtr]::Zero, $x, $y, $winPhysW, $winPhysH,
+        ($SWP_NOACTIVATE -bor $SWP_NOZORDER))
 
     $animTimer.Start()
     $null = $app.Run()   # Run() 返回退出码，必须吞掉，保持 stdout 干净
