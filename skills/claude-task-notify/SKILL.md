@@ -27,24 +27,29 @@ Claude Code 每次停止响应（任务回合结束）时，Windows 右下角自
 
 ## 测试入口
 
-用户说「测试弹窗」时执行：
+用户说「测试弹窗」时执行（stdin 喂 Stop 事件 JSON）：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\PC\.claude\scripts\task-notify.ps1" -Title "测试" -Message "弹窗工作正常" -Type done
+$evt = @{ session_id="test"; cwd=(Get-Location).Path; hook_event_name="Stop";
+          stop_hook_active=$false; last_assistant_message="弹窗工作正常" } | ConvertTo-Json
+$evt | powershell -NoProfile -ExecutionPolicy Bypass -File "$HOME\.claude\scripts\notify-complete.ps1"
 ```
 
-- `-Type done` → ✅ 任务完成；`-Type need_info` → ❓ 需要用户提供相关信息
+- 结尾带「请提供…」→ ❓ 需要用户提供相关信息；正常结尾 → ✅ 任务完成
+- 测试结果见日志：`%TEMP%\claude-code-notify\notify.log`
 
 ## 诊断速查
 
 | 现象 | 处理 |
 |---|---|
-| 弹窗不出现 | 检查 `~/.claude/settings.json` 是否含 `hooks` 键；用上方测试命令确认脚本本身可用 |
-| 中文乱码 | `task-notify.ps1` 必须是 **UTF-8 with BOM**（PS 5.1 对无 BOM 的 UTF-8 按 ANSI/GBK 解释） |
+| 弹窗不出现 | 看日志 `%TEMP%\claude-code-notify\notify.log`：`SKIP`=被过滤（子代理/权限/递归）、`DEDUPE`=2秒内重复、`ERR`=输入/派生失败 |
+| 中文乱码 | `notify-complete.ps1` / `show-popup.ps1` 必须是 **UTF-8 with BOM**（PS 5.1 对无 BOM 的 UTF-8 按 ANSI/GBK 解释） |
 | 与系统通知重复弹 | 在 `/config` 中关闭 Claude Code 内置通知（hooks 弹窗与系统通知互不抑制） |
+| 想临时关闭 | 删除 `settings.json` 中 `hooks` 键即可（脚本可保留） |
 
 ## 卸载
 
 1. 删除 `~/.claude/settings.json` 中的 `hooks` 键（备份在 `settings.json.bak`）
-2. 删除 `~/.claude/scripts/task-notify.ps1`
+2. 删除 `~/.claude/scripts/notify-complete.ps1` 与 `~/.claude/scripts/show-popup.ps1`
 3. 删除本 skill 目录与 `CLAUDE.md` 中「任务完成弹窗（全局强制）」小节
+4. 可选：删除临时目录 `%TEMP%\claude-code-notify\`
