@@ -245,13 +245,18 @@ try {
     $null = [Win32Ext]::SetWindowLong($hwnd, $GWL_EXSTYLE, ($ex -bor $WS_EX_NOACTIVATE -bor $WS_EX_TOOLWINDOW))
 
     # 多显示器：弹在鼠标所在屏幕的右下角（SetWindowPos 物理像素精确定位）
+    # ⚠️ WorkingArea 与 SetWindowPos 均为物理像素，偏移量必须 ×DPI scale 换算，
+    #    不能直接减 DIP 值（否则窗口被推出屏幕——历史 bug）
     $scr = [System.Windows.Forms.Screen]::FromPoint([System.Windows.Forms.Cursor]::Position)
     $wa2 = $scr.WorkingArea
-    $null = [Win32Ext]::SetWindowPos(
-        $hwnd, [IntPtr]::Zero,
-        ($wa2.Right - $W - $MARGIN - $SHADOW_PAD),
-        ($wa2.Bottom - $H - $MARGIN - $SHADOW_PAD),
-        0, 0, ($SWP_NOSIZE -bor $SWP_NOZORDER))
+    $src = [System.Windows.PresentationSource]::FromVisual($win)
+    $m = $src.CompositionTarget.TransformToDevice
+    $winPhysW = [int](($W + 2 * $SHADOW_PAD) * $m.M11)
+    $winPhysH = [int](($H + 2 * $SHADOW_PAD) * $m.M22)
+    $marginPx = [int]($MARGIN * $m.M11)
+    $x = $wa2.Right - $winPhysW - $marginPx
+    $y = $wa2.Bottom - $winPhysH - $marginPx
+    $null = [Win32Ext]::SetWindowPos($hwnd, [IntPtr]::Zero, $x, $y, $winPhysW, $winPhysH, $SWP_NOZORDER)
 
     $animTimer.Start()
     $null = $app.Run()   # Run() 返回退出码，必须吞掉，保持 stdout 干净
