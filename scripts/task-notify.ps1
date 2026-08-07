@@ -64,11 +64,24 @@ function Test-NeedInfo {
 # 导致 Substring(0, $null) = 空串，正文只剩省略号（历史 bug 根因）
 $MAX_CHARS = 50
 
-# 提取摘要：去 markdown 符号、压缩空白、截断 $MAX_CHARS 字
+# 提取摘要：清洗代码块/HTML/emoji/markdown，取首段自然语言，截断 $MAX_CHARS 字
 function Get-Summary {
     param([string]$t)
     if (-not $t) { return "" }
-    $clean = $t -replace '`', '' -replace '\*\*?', '' -replace '^#+\s*', '' -replace '^\s*[-*+]\s*', ''
+    # 去代码块（```...```）与行内代码（`...`）
+    $clean = [regex]::Replace($t, '```[\s\S]*?```', ' ')
+    $clean = $clean -replace '`[^`]*`', ' '
+    # 去 HTML 标签；常见实体转回原文，残留实体清除
+    $clean = [regex]::Replace($clean, '<[^>]+>', ' ')
+    $clean = $clean -replace '&amp;', '&' -replace '&lt;', '<' -replace '&gt;', '>' -replace '&quot;', '"'
+    $clean = $clean -replace '&[a-zA-Z#0-9]{1,8};', ' '
+    # 去 markdown 符号
+    $clean = $clean -replace '\*\*?', '' -replace '^#+\s*', '' -replace '^\s*[-*+]\s*', ''
+    # 去 emoji（补充平面代理对，GDI 渲染 emoji 会变方块乱码）
+    $clean = [regex]::Replace($clean, '[\uD800-\uDBFF][\uDC00-\uDFFF]', '')
+    # 取首段（按空行分段）
+    $paras = @($clean -split '(\r?\n\s*){2,}' | Where-Object { $_.Trim() })
+    if ($paras.Count -gt 0) { $clean = $paras[0] }
     $clean = $clean -replace '\s+', ' '
     $clean = $clean.Trim()
     if ($clean.Length -gt $MAX_CHARS) { $clean = $clean.Substring(0, $MAX_CHARS) + "…" }
@@ -169,12 +182,12 @@ $null = [NotifyWin32]::SetProcessDPIAware()
 $scale = [NotifyWin32]::GetDpiForSystem() / 96.0
 # 尺寸基准值（100% DPI），经 HTML 调整器调优
 $W = [int](380 * $scale)        # 卡片宽度
-$H = [int](150 * $scale)        # 卡片高度
+$H = [int](180 * $scale)        # 卡片高度
 $MARGIN = [int](20 * $scale)
 $PAD_X = [int](20 * $scale)     # 标题左边距
-$PAD_TOP = [int](14 * $scale)   # 标题上边距
-$BODY_TOP = [int](34 * $scale)  # 正文上边距
-$BODY_H = [int](60 * $scale)    # 正文区域高度
+$PAD_TOP = [int](15 * $scale)   # 标题上边距
+$BODY_TOP = [int](40 * $scale)  # 正文上边距
+$BODY_H = [int](70 * $scale)    # 正文区域高度
 $F_TITLE = 8 * $scale           # 标题字号 (pt)
 $F_BODY = 7 * $scale            # 正文字号 (pt)
 $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
