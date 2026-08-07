@@ -69,7 +69,21 @@ claude-task-notify/
         └── SKILL.md                 # 行为规范 skill（可选安装）
 ```
 
-## 📦 安装
+## 🤖 用 Claude Code 安装（推荐）
+
+把下面这段话连同本仓库链接一起发给你的 Claude Code，它会自动完成全部安装并自测：
+
+> 请把仓库 `<本仓库链接>` 中的 `claude-task-notify` 安装到我的全局配置（Windows）：
+> 1. 将 `scripts\notify-complete.ps1` 与 `scripts\show-popup.ps1` 复制到 `~\.claude\scripts\`
+> 2. 在 `~\.claude\settings.json` 顶层添加 `hooks.Stop`，command 用绝对解释器路径 + `-WindowStyle Hidden`：
+>    `"\"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe\" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File \"C:\Users\<你的用户名>\.claude\scripts\notify-complete.ps1\""`，`"timeout": 5`
+> 3. 将 `skills\claude-task-notify\` 复制到 `~\.claude\skills\`
+> 4. 在 `~\.claude\CLAUDE.md` 末尾追加「任务完成弹窗（全局强制）」小节
+> 5. 自测弹窗：`$evt = @{session_id="test"; cwd=(Get-Location).Path; hook_event_name="Stop"; stop_hook_active=$false; last_assistant_message="弹窗工作正常"} | ConvertTo-Json; $evt | & "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "$HOME\.claude\scripts\notify-complete.ps1"`
+
+Claude Code 会按以上步骤执行并触发测试弹窗；也可以按下方「📦 手动安装」自行操作。
+
+## 📦 手动安装
 
 > 环境要求：Windows 10/11，Claude Code v2.x，PowerShell 5.1（系统自带）
 
