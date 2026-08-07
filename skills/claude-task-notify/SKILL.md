@@ -11,9 +11,9 @@ Claude Code 每次停止响应（任务回合结束）时，Windows 右下角自
 
 - ✅ **任务完成** — 若本次回复以问号结尾或包含请求词（"请提供…""需要你…"），则显示 ❓ **需要用户提供相关信息**
 - 正文附本次回复的摘要（首句，截断 50 字，自动换行）
-- 白色圆角卡片（黑字）、淡入淡出、5 秒自动消失、点击或按 Esc 立即关闭
+- 白色圆角卡片（黑字）、淡入淡出、8 秒自动消失、点击卡片或右上角 ✕ 立即关闭（无 Esc——无焦点窗口收不到键盘事件）
 
-**触发机制**：全局 `~/.claude/settings.json` 的 `Stop` hook → `~/.claude/scripts/task-notify.ps1`。这是 **harness 层强制执行**，对**所有项目**生效，与模型行为无关——不需要本 skill 被触发，弹窗也照常出现。
+**触发机制**：全局 `~/.claude/settings.json` 的 `Stop` hook → `~/.claude/scripts/notify-complete.ps1`（hook 命令必须是绝对解释器路径 + `-WindowStyle Hidden`，否则每次 Stop 闪现控制台窗口）。这是 **harness 层强制执行**，对**所有项目**生效，与模型行为无关——不需要本 skill 被触发，弹窗也照常出现。
 
 ## Claude 收尾行为规范（与弹窗判断配合）
 

@@ -124,6 +124,21 @@ public static class Win32Ext {
     [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr MonitorFromPoint(POINT pt, uint dwFlags);
     [DllImport("user32.dll", SetLastError = true)] public static extern bool GetMonitorInfo(IntPtr hMonitor, out MONITORINFO lpmi);
     [DllImport("shcore.dll", SetLastError = true)] public static extern int GetDpiForMonitor(IntPtr hMonitor, int dpiType, out uint dpiX, out uint dpiY);
+    // 第五轮审查修复：Get/SetWindowLongPtr 精确失败判断——
+    //   PS 5.1 层直接调 Marshal.SetLastWin32Error 会抛 RuntimeException（曾导致弹窗
+    //   渲染失败），故清零+读取 last error 全部收进 C# 包装层（.NET Framework 层可用）。
+    //   语义：返回 0 且 last error≠0 才是失败；返回 0 且 last error=0 是"成功但旧值恰为 0"
+    [DllImport("kernel32.dll")] private static extern void SetLastError(uint dwErrCode);
+    public static bool GetWindowLongPtrChecked(IntPtr hWnd, int nIndex, out IntPtr value) {
+        SetLastError(0);
+        value = GetWindowLongPtr64(hWnd, nIndex);
+        return !(value == IntPtr.Zero && Marshal.GetLastWin32Error() != 0);
+    }
+    public static bool SetWindowLongPtrChecked(IntPtr hWnd, int nIndex, IntPtr dwNewLong) {
+        SetLastError(0);
+        IntPtr ret = SetWindowLongPtr64(hWnd, nIndex, dwNewLong);
+        return !(ret == IntPtr.Zero && Marshal.GetLastWin32Error() != 0);
+    }
     [StructLayout(LayoutKind.Sequential)]
     public struct POINT { public int X; public int Y; }
     [StructLayout(LayoutKind.Sequential)]
@@ -138,13 +153,18 @@ public static class Win32Ext {
 }
 "@
 # PER_MONITOR_AWARE_V2 = -4：必须在任何 WPF 窗口创建之前调用
-# 第四轮审查修复：失败不静默——记录日志并明确回退 system-aware（混合 DPI 可能不准）
+# 第五轮审查修复：PMv2 失败 → 跳过自定义定位，保留 WPF 初始位置
+#   （system-aware 下 GetDpiForMonitor 返回的是系统 DPI，按它换算的物理尺寸/坐标
+#     在混合 DPI 副屏上会缩小或错位；WPF 初始位置由系统按主屏正确计算）
+$pmv2Ok = $false
 try {
-    if (-not [Win32Ext]::SetProcessDpiAwarenessContext([IntPtr](-4))) {
-        Write-NotifyLog "UI pmv2-failed-system-fallback"
+    if ([Win32Ext]::SetProcessDpiAwarenessContext([IntPtr](-4))) {
+        $pmv2Ok = $true
+    } else {
+        Write-NotifyLog "UI pmv2-failed-initial-pos"
     }
 } catch {
-    Write-NotifyLog "UI pmv2-error"
+    Write-NotifyLog "UI pmv2-error-initial-pos"
 }
 $GWL_EXSTYLE = -20
 $WS_EX_NOACTIVATE = 0x08000000
@@ -260,7 +280,7 @@ $grid.Children.Add($tbBody) | Out-Null
 
 $win.Content = $border
 
-# ---- 关闭逻辑：点击卡片任意处 / Esc ----
+# ---- 关闭逻辑：点击卡片任意处 / 右上角 ✕ 立即关闭（无 Esc——无焦点窗口收不到键盘事件）----
 $win.Add_MouseLeftButtonDown({
     $script:animTimer.Stop()
     $win.Close()
@@ -300,16 +320,19 @@ try {
     $null = $win.Show()
     $hwnd = (New-Object System.Windows.Interop.WindowInteropHelper($win)).Handle
 
-    # ① 叠加 WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW（Ptr API + 正确失败判断）
-    $exOld = [Win32Ext]::GetWindowLongPtr64($hwnd, $GWL_EXSTYLE)
-    $exNew = [IntPtr]($exOld.ToInt64() -bor $WS_EX_NOACTIVATE -bor $WS_EX_TOOLWINDOW)
-    $r1 = [Win32Ext]::SetWindowLongPtr64($hwnd, $GWL_EXSTYLE, $exNew)
-    # 失败判断：SetWindowLongPtr 返回旧值（理论可为 0）。
-    # ⚠️ PS 5.1 实测无 Marshal.SetLastWin32Error（.NET 4.5 方法，但 PS 5.1 运行时不可用——
-    #    曾因此抛 RuntimeException 导致弹窗渲染失败），无法先清零 last error。
-    #    实用方案：实际窗口的 GWL_EXSTYLE 旧值几乎不可能为 0，返回零即视为失败（可接受边界）
-    if ($r1 -eq [IntPtr]::Zero) {
-        Write-NotifyLog "UI style-apply-failed"
+    # ① 叠加 WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW
+    # 第五轮审查修复：失败判断收进 C# 包装层——调用前 SetLastError(0)，调用后
+    #   读 Marshal.GetLastWin32Error()（PS 5.1 层直接调会抛 RuntimeException，
+    #   Add-Type 编译的 C# 层可用）。返回 0 + last error≠0 才是失败；
+    #   返回 0 + last error=0 是"成功但旧值恰为 0"，不再误报
+    $exOld = [IntPtr]::Zero
+    if ([Win32Ext]::GetWindowLongPtrChecked($hwnd, $GWL_EXSTYLE, [ref]$exOld)) {
+        $exNew = [IntPtr]($exOld.ToInt64() -bor $WS_EX_NOACTIVATE -bor $WS_EX_TOOLWINDOW)
+        if (-not [Win32Ext]::SetWindowLongPtrChecked($hwnd, $GWL_EXSTYLE, $exNew)) {
+            Write-NotifyLog "UI style-apply-failed"
+        }
+    } else {
+        Write-NotifyLog "UI style-read-failed"
     }
     # 用 SWP_FRAMECHANGED | SWP_NOACTIVATE 刷新扩展样式（不移动、不激活）
     if (-not [Win32Ext]::SetWindowPos($hwnd, [IntPtr]::Zero, 0, 0, 0, 0,
@@ -317,11 +340,11 @@ try {
         Write-NotifyLog "UI style-refresh-failed"
     }
 
-    # ② 多显示器定位（第四轮审查修复）：
-    #    全链路失败检查——GetCursorPos / MonitorFromPoint / GetMonitorInfo 任一失败
-    #    则跳过 SetWindowPos（保留 WPF 初始位置），绝不使用未初始化/全零数据计算
-    #    坐标（否则窗口会被移出屏幕）
-    $posOk = $true
+    # ② 多显示器定位（第四轮+第五轮审查修复）：
+    #    全链路失败检查——PMv2 失败 / GetCursorPos / MonitorFromPoint / GetMonitorInfo
+    #    / GetDpiForMonitor 任一失败则跳过 SetWindowPos（保留 WPF 初始位置），
+    #    绝不使用未初始化/回退数据计算坐标（否则窗口会被移出屏幕或错位）
+    $posOk = $pmv2Ok
     $pt = New-Object Win32Ext+POINT
     if (-not [Win32Ext]::GetCursorPos([ref]$pt)) {
         $posOk = $false
@@ -347,9 +370,10 @@ try {
     if ($posOk) {
         $hr = [Win32Ext]::GetDpiForMonitor($hMon, $MDT_EFFECTIVE_DPI, [ref]$dpiX, [ref]$dpiY)
         if ($hr -ne 0 -or $dpiX -le 0 -or $dpiY -le 0) {
-            # DPI 查询失败：回退 96 不阻断定位（窗口尺寸按 1.0 计算）
-            $dpiX = 96; $dpiY = 96
-            Write-NotifyLog "UI dpi-fallback-96"
+            # DPI 查询失败：跳过 SetWindowPos，保留 WPF 初始位置
+            #（按 96 计算的物理尺寸在 150% 屏上会缩小 1/3，错误定位比不定位更糟）
+            $posOk = $false
+            Write-NotifyLog "UI dpi-failed-initial-pos"
         }
     }
     if ($posOk) {

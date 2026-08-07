@@ -24,7 +24,7 @@
 │ 件，测试全部通过。后续如需部署…  │
 └────────────────────────────────┘
    ↑ 右下角 · 白底黑字 · 圆角 · 淡入淡出
-     5 秒自动消失 · 点击/Esc 立即关闭
+     8 秒自动消失 · 点击/✕ 立即关闭
 ```
 
 ## 🔧 工作原理
@@ -45,7 +45,7 @@ notify-complete.ps1（入口，500ms 内返回）
 show-popup.ps1（独立进程，-STA）
         │  读取 payload 后立即删除 → WPF(DirectWrite) 渲染
         ▼
-右下角非模态卡片：不抢焦点 · 圆角+阴影 · 8 秒自动淡出 · 点击/✕/Esc 关闭
+右下角非模态卡片：不抢焦点 · 圆角+阴影 · 8 秒自动淡出 · 点击/✕ 关闭（无 Esc——无焦点窗口收不到键盘事件）
 ```
 
 - hook 入口**快速返回**（500ms 内），UI 生命周期由独立进程管理——弹窗显示期间 Claude Code 完全不受影响
@@ -58,8 +58,9 @@ show-popup.ps1（独立进程，-STA）
 ```
 claude-task-notify/
 ├── README.md                        # 本文件
-├── 需求.md                          # 原始需求
+├── 原理以及文件路径.md              # 技术原理/文件路径/审查记录（供外部审查）
 ├── 弹窗参数调整器.html              # 可视化参数调整工具（浏览器打开）
+├── 需求/                            # 原始需求与规格（不入库）
 ├── scripts/
 │   ├── notify-complete.ps1          # hook 入口：过滤/摘要/去重/派生 UI
 │   └── show-popup.ps1               # UI 进程：WPF 卡片弹窗（独立运行）
@@ -93,7 +94,7 @@ Copy-Item scripts\show-popup.ps1 "$HOME\.claude\scripts\"
         "hooks": [
           {
             "type": "command",
-            "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"C:\\Users\\<你的用户名>\\.claude\\scripts\\notify-complete.ps1\"",
+            "command": "\"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File \"C:\\Users\\<你的用户名>\\.claude\\scripts\\notify-complete.ps1\"",
             "timeout": 5
           }
         ]
@@ -104,6 +105,8 @@ Copy-Item scripts\show-popup.ps1 "$HOME\.claude\scripts\"
 ```
 
 > ⚠️ 把 `<你的用户名>` 替换为实际路径；配置后无需重启，下一次任务结束即生效。UI 进程由入口自动派生（`-STA` 已内置），hook 本身无需 STA。
+>
+> 💡 解释器必须用绝对路径 + `-WindowStyle Hidden`：PATH 里的 `powershell` 可被劫持，且每次 Stop 都会闪现控制台窗口。
 
 **第 3 步**（可选）：安装行为规范 skill
 
@@ -118,12 +121,12 @@ Copy-Item skills\claude-task-notify "$HOME\.claude\skills\" -Recurse
 ```markdown
 # 任务完成弹窗（全局强制）
 > hook 已配置：每次任务结束右下角自动弹窗（✅任务完成 / ❓需要用户提供相关信息）。
-> 测试：powershell -NoProfile -ExecutionPolicy Bypass -File "$HOME\.claude\scripts\task-notify.ps1" -Title "测试" -Message "正常" -Type done
+> 测试：见下方「🧪 手动测试」，向 notify-complete.ps1 的 stdin 喂 Stop 事件 JSON 即可触发弹窗。
 ```
 
 ## 🎨 参数调整
 
-打开 `弹窗参数调整器.html`（浏览器），拖动滑块实时预览卡片效果，调好后把页面右下角生成的参数代码发回，替换 `task-notify.ps1` 中的对应值即可。
+打开 `弹窗参数调整器.html`（浏览器），拖动滑块实时预览卡片效果，调好后把页面右下角生成的参数代码发回，替换 `show-popup.ps1` 顶部常量区（`$W`/`$H`/`$F_TITLE`/`$F_BODY` 等）即可。
 
 > 预览已按「系统缩放（默认 150%，可在页面调整）× 浏览器缩放」自动校准，所见即真实弹窗的物理大小——与浏览器窗口缩放无关。
 
