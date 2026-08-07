@@ -59,6 +59,12 @@ function Write-NotifyLog {
         } catch [System.Threading.AbandonedMutexException] {
             $got = $true    # Abandoned：锁已取得，稍后必须释放
         } catch { }
+        # 第七轮审查修复：超时不再用 AppendAllText 绕过 Mutex——持锁进程 ReadWrite
+        #   打开时，并发 AppendAllText 会共享冲突抛异常（被 catch 吞 = 丢日志且无痕迹）。
+        #   改为：有限重试一次，仍失败则明确放弃本条（宁可丢一条诊断记录，也不无锁竞争）
+        if (-not $got) {
+            try { $got = $mutex.WaitOne(100) } catch [System.Threading.AbandonedMutexException] { $got = $true } catch { }
+        }
         try {
             if ($got) {
                 $fs = [IO.File]::Open($LOG_FILE, [IO.FileMode]::OpenOrCreate,
@@ -70,9 +76,8 @@ function Write-NotifyLog {
                     $bytes = [System.Text.Encoding]::UTF8.GetBytes($line)
                     $fs.Write($bytes, 0, $bytes.Length)
                 } finally { $fs.Close() }
-            } else {
-                [System.IO.File]::AppendAllText($LOG_FILE, $line)   # fail-open：单次追加
             }
+            # $got=false（重试仍超时）：放弃本条，不写
         } finally {
             if ($got) { try { $mutex.ReleaseMutex() } catch { } }
             $mutex.Dispose()

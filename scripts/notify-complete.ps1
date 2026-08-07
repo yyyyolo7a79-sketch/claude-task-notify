@@ -51,6 +51,12 @@ function Write-NotifyLog {
         } catch [System.Threading.AbandonedMutexException] {
             $got = $true    # Abandoned：锁已取得，稍后必须释放
         } catch { }
+        # 第七轮审查修复：超时不再用 AppendAllText 绕过 Mutex——持锁进程 ReadWrite
+        #   打开时，并发 AppendAllText 会共享冲突抛异常（被 catch 吞 = 丢日志且无痕迹）。
+        #   改为：有限重试一次，仍失败则明确放弃本条（宁可丢一条诊断记录，也不无锁竞争）
+        if (-not $got) {
+            try { $got = $mutex.WaitOne(100) } catch [System.Threading.AbandonedMutexException] { $got = $true } catch { }
+        }
         try {
             if ($got) {
                 $fs = [IO.File]::Open($LOG_FILE, [IO.FileMode]::OpenOrCreate,
@@ -62,9 +68,8 @@ function Write-NotifyLog {
                     $bytes = [System.Text.Encoding]::UTF8.GetBytes($line)
                     $fs.Write($bytes, 0, $bytes.Length)
                 } finally { $fs.Close() }
-            } else {
-                [System.IO.File]::AppendAllText($LOG_FILE, $line)   # fail-open：单次追加
             }
+            # $got=false（重试仍超时）：放弃本条，不写
         } finally {
             if ($got) { try { $mutex.ReleaseMutex() } catch { } }
             $mutex.Dispose()
@@ -130,7 +135,7 @@ function Test-NeedInfo {
     return $false
 }
 
-# 摘要：清洗代码块/HTML/实体/markdown/图片/URL，取首段，截断 50 字
+# 摘要：清洗代码块/HTML/实体/markdown/图片/URL，取首段，截断 $MAX_CHARS（默认 180）字
 # 顺序要点：图片先删（否则 URL 删除后残留 "![x]("）；标题/列表正则带 (?m) multiline；
 #           不再删 emoji（WPF DirectWrite 渲染正常，且 surrogate 正则误删所有非 BMP 字符）
 function Get-Summary {

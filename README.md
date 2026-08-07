@@ -38,7 +38,7 @@ Stop hook（~/.claude/settings.json 全局配置，timeout 5s）
         ▼
 notify-complete.ps1（入口，500ms 内返回）
         │  ① 过滤：仅 Stop 且 stop_hook_active=false（忽略子代理/权限交互）
-        │  ② 摘要：本地确定性清洗（代码块/HTML/实体/emoji/URL → 首段 50 字）
+        │  ② 摘要：本地确定性清洗（代码块/HTML/实体/emoji/URL → 首段 180 字）
         │  ③ 去重：SHA-256(session+回复)，2 秒窗口内重复只弹一次
         │  ④ 写临时 payload → Start-Process 派生独立 UI 进程
         ▼
