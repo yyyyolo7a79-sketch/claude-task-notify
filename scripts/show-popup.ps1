@@ -46,7 +46,10 @@ $DURATION_MS = 8000        # 显示时长 8 秒（规格 3.2）
 
 # 脱敏日志（与入口共用同一文件；实现与 notify-complete.ps1 保持同步）
 # 第六轮审查修复：命名 Mutex 串行化「检查→滚动→追加」；滚动用 SetLength(0) 截断
-#   （不删除文件，避免另一进程已打开句柄失效）；超时 fail-open 直接追加
+#   （不删除文件，避免另一进程已打开句柄失效）；
+# 第八轮审查修复：超时直接放弃本条，不无锁写（AppendAllText 在持锁 ReadWrite
+#   下会共享冲突；且不重试——入口最坏等待 = 去重锁 100ms + 日志锁 100ms ≈ 200ms，
+#   保证 500ms 返回目标成立）
 function Write-NotifyLog {
     param([string]$msg)
     try {
@@ -59,12 +62,7 @@ function Write-NotifyLog {
         } catch [System.Threading.AbandonedMutexException] {
             $got = $true    # Abandoned：锁已取得，稍后必须释放
         } catch { }
-        # 第七轮审查修复：超时不再用 AppendAllText 绕过 Mutex——持锁进程 ReadWrite
-        #   打开时，并发 AppendAllText 会共享冲突抛异常（被 catch 吞 = 丢日志且无痕迹）。
-        #   改为：有限重试一次，仍失败则明确放弃本条（宁可丢一条诊断记录，也不无锁竞争）
-        if (-not $got) {
-            try { $got = $mutex.WaitOne(100) } catch [System.Threading.AbandonedMutexException] { $got = $true } catch { }
-        }
+        # 超时直接放弃本条（单次 WaitOne 100ms，不重试——最坏等待可控，见函数头注释）
         try {
             if ($got) {
                 $fs = [IO.File]::Open($LOG_FILE, [IO.FileMode]::OpenOrCreate,
@@ -77,7 +75,7 @@ function Write-NotifyLog {
                     $fs.Write($bytes, 0, $bytes.Length)
                 } finally { $fs.Close() }
             }
-            # $got=false（重试仍超时）：放弃本条，不写
+            # $got=false（超时）：放弃本条，不写
         } finally {
             if ($got) { try { $mutex.ReleaseMutex() } catch { } }
             $mutex.Dispose()
