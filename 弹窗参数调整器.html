@@ -17,11 +17,12 @@
   /* ===== 右侧预览区 ===== */
   .preview { flex: 1; position: relative; background: linear-gradient(135deg, #e8eaee, #d4d7dd); overflow: hidden; }
   .preview .hint { position: absolute; top: 12px; left: 16px; font-size: 12px; color: #667; }
-  /* 弹窗卡片（模拟实际效果，白底黑字圆角，位置右下角） */
+  /* 弹窗卡片（模拟实际效果，白底黑字圆角，位置右下角）
+     --disp = 系统缩放 / 浏览器缩放：预览物理大小 = 真实弹窗物理大小 */
   #card {
     position: absolute;
     right: 20px; bottom: 20px;
-    width: var(--w); height: var(--h);
+    width: calc(var(--w) * var(--disp)); height: calc(var(--h) * var(--disp));
     background: #ffffff;
     border: 1px solid #cccccc;
     border-radius: 16px;
@@ -30,14 +31,17 @@
     overflow: hidden;
   }
   #cardTitle {
-    position: absolute; left: var(--pad-x); top: var(--pad-top);
-    font-size: var(--fs-title); font-weight: bold; color: #000;
+    position: absolute;
+    left: calc(var(--pad-x) * var(--disp)); top: calc(var(--pad-top) * var(--disp));
+    font-size: calc(var(--fs-title) * var(--disp)); font-weight: bold; color: #000;
     white-space: nowrap;
   }
   #cardBody {
-    position: absolute; left: var(--pad-x); top: var(--body-top);
-    width: calc(100% - var(--pad-x) * 2); height: var(--body-h);
-    font-size: var(--fs-body); color: #333; line-height: 1.5;
+    position: absolute;
+    left: calc(var(--pad-x) * var(--disp)); top: calc(var(--body-top) * var(--disp));
+    width: calc(100% - var(--pad-x) * var(--disp) * 2);
+    height: calc(var(--body-h) * var(--disp));
+    font-size: calc(var(--fs-body) * var(--disp)); color: #333; line-height: 1.5;
     overflow: hidden;
   }
   /* ===== 底部输出区 ===== */
@@ -52,19 +56,20 @@
 <!-- ===== 左侧参数面板 ===== -->
 <div class="panel">
   <h1>弹窗参数调整器</h1>
-  <div class="tip">拖动滑块实时预览，调好后复制下方参数代码发给我，我会改到脚本里。</div>
+  <div class="tip">拖动滑块实时预览（预览已按 系统缩放 × 浏览器缩放 自动校准，所见即真实弹窗大小）。调好后复制下方参数代码发给我。</div>
 
+  <div class="row"><div class="lab"><span>系统缩放 %（本机 150）</span><span class="val" id="v-scale">150</span></div><input type="range" id="p-scale" min="100" max="200" step="5" value="150"></div>
   <div class="row"><div class="lab"><span>卡片宽度 W</span><span class="val" id="v-w">380</span></div><input type="range" id="p-w" min="280" max="560" step="5" value="380"></div>
-  <div class="row"><div class="lab"><span>卡片高度 H</span><span class="val" id="v-h">96</span></div><input type="range" id="p-h" min="80" max="220" step="5" value="96"></div>
-  <div class="row"><div class="lab"><span>标题字号</span><span class="val" id="v-ft">11</span></div><input type="range" id="p-ft" min="8" max="20" step="0.5" value="11"></div>
-  <div class="row"><div class="lab"><span>正文字号</span><span class="val" id="v-fb">9</span></div><input type="range" id="p-fb" min="7" max="16" step="0.5" value="9"></div>
+  <div class="row"><div class="lab"><span>卡片高度 H</span><span class="val" id="v-h">180</span></div><input type="range" id="p-h" min="80" max="240" step="5" value="180"></div>
+  <div class="row"><div class="lab"><span>标题字号</span><span class="val" id="v-ft">8</span></div><input type="range" id="p-ft" min="6" max="20" step="0.5" value="8"></div>
+  <div class="row"><div class="lab"><span>正文字号</span><span class="val" id="v-fb">7</span></div><input type="range" id="p-fb" min="5" max="16" step="0.5" value="7"></div>
   <div class="row"><div class="lab"><span>标题左边距 PAD_X</span><span class="val" id="v-px">20</span></div><input type="range" id="p-px" min="10" max="40" step="1" value="20"></div>
-  <div class="row"><div class="lab"><span>标题上边距 PAD_TOP</span><span class="val" id="v-pt">14</span></div><input type="range" id="p-pt" min="6" max="40" step="1" value="14"></div>
-  <div class="row"><div class="lab"><span>正文上边距 BODY_TOP</span><span class="val" id="v-bt">46</span></div><input type="range" id="p-bt" min="30" max="120" step="1" value="46"></div>
-  <div class="row"><div class="lab"><span>正文区域高度 BODY_H</span><span class="val" id="v-bh">40</span></div><input type="range" id="p-bh" min="20" max="140" step="2" value="40"></div>
-  <div class="row"><div class="lab"><span>摘要截断长度（字）</span><span class="val" id="v-mc">60</span></div><input type="range" id="p-mc" min="20" max="120" step="5" value="60"></div>
+  <div class="row"><div class="lab"><span>标题上边距 PAD_TOP</span><span class="val" id="v-pt">15</span></div><input type="range" id="p-pt" min="6" max="40" step="1" value="15"></div>
+  <div class="row"><div class="lab"><span>正文上边距 BODY_TOP</span><span class="val" id="v-bt">40</span></div><input type="range" id="p-bt" min="30" max="120" step="1" value="40"></div>
+  <div class="row"><div class="lab"><span>正文区域高度 BODY_H</span><span class="val" id="v-bh">70</span></div><input type="range" id="p-bh" min="20" max="160" step="2" value="70"></div>
+  <div class="row"><div class="lab"><span>摘要截断长度（字）</span><span class="val" id="v-mc">50</span></div><input type="range" id="p-mc" min="20" max="120" step="5" value="50"></div>
 
-  <div class="tip" style="margin-top:10px; color:#c0392b;">提示：如果系统是 125%/150% 缩放，实际弹窗会按比例等比放大——先用默认值对比，觉得整体偏大就把字号调小 1~2。</div>
+  <div class="tip" style="margin-top:10px; color:#c0392b;">提示：系统缩放应与你电脑的显示缩放一致（可在 设置→显示 查看，本机 150%）。预览按「基准值 × 系统缩放 ÷ 浏览器缩放」渲染，与真实弹窗像素级一致。</div>
 </div>
 
 <!-- ===== 右侧预览区 ===== -->
@@ -93,6 +98,7 @@
 
   function update() {
     var v = {
+      SCALE: +document.getElementById('p-scale').value,
       W: +document.getElementById('p-w').value,
       H: +document.getElementById('p-h').value,
       FT: +document.getElementById('p-ft').value,
@@ -103,7 +109,11 @@
       BH: +document.getElementById('p-bh').value,
       MC: +document.getElementById('p-mc').value
     };
+    // 缩放校准：预览物理大小 = 基准值 × 系统缩放 ÷ 浏览器缩放（devicePixelRatio）
+    var disp = (v.SCALE / 100) / (window.devicePixelRatio || 1);
+    document.getElementById('card').style.setProperty('--disp', disp);
     // 更新数值显示
+    document.getElementById('v-scale').textContent = v.SCALE;
     document.getElementById('v-w').textContent = v.W;
     document.getElementById('v-h').textContent = v.H;
     document.getElementById('v-ft').textContent = v.FT;
@@ -157,7 +167,7 @@
   });
 
   // 所有滑块绑定
-  ['p-w','p-h','p-ft','p-fb','p-px','p-pt','p-bt','p-bh','p-mc'].forEach(function (id) {
+  ['p-scale','p-w','p-h','p-ft','p-fb','p-px','p-pt','p-bt','p-bh','p-mc'].forEach(function (id) {
     document.getElementById(id).addEventListener('input', update);
   });
 
