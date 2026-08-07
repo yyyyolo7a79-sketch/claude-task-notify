@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Claude 弹窗参数调整器</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: "Segoe UI", "Microsoft YaHei", sans-serif; background: #f0f2f5; display: flex; height: 100vh; }
+  /* ===== 左侧参数面板 ===== */
+  .panel { width: 330px; background: #fff; border-right: 1px solid #ddd; padding: 18px 20px; overflow-y: auto; }
+  .panel h1 { font-size: 16px; margin-bottom: 4px; }
+  .panel .tip { font-size: 12px; color: #888; margin-bottom: 14px; }
+  .row { margin-bottom: 12px; }
+  .row .lab { display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 3px; }
+  .row .lab .val { font-weight: bold; color: #1a73e8; }
+  .row input[type=range] { width: 100%; }
+  /* ===== 右侧预览区 ===== */
+  .preview { flex: 1; position: relative; background: linear-gradient(135deg, #e8eaee, #d4d7dd); overflow: hidden; }
+  .preview .hint { position: absolute; top: 12px; left: 16px; font-size: 12px; color: #667; }
+  /* 弹窗卡片（模拟实际效果，白底黑字圆角，位置右下角） */
+  #card {
+    position: absolute;
+    right: 20px; bottom: 20px;
+    width: var(--w); height: var(--h);
+    background: #ffffff;
+    border: 1px solid #cccccc;
+    border-radius: 16px;
+    box-shadow: 0 6px 24px rgba(0,0,0,0.18);
+    padding: 0;
+    overflow: hidden;
+  }
+  #cardTitle {
+    position: absolute; left: var(--pad-x); top: var(--pad-top);
+    font-size: var(--fs-title); font-weight: bold; color: #000;
+    white-space: nowrap;
+  }
+  #cardBody {
+    position: absolute; left: var(--pad-x); top: var(--body-top);
+    width: calc(100% - var(--pad-x) * 2); height: var(--body-h);
+    font-size: var(--fs-body); color: #333; line-height: 1.5;
+    overflow: hidden;
+  }
+  /* ===== 底部输出区 ===== */
+  .output { position: absolute; left: 16px; bottom: 16px; max-width: 480px; background: rgba(255,255,255,0.92); border: 1px solid #ccc; border-radius: 8px; padding: 10px 14px; font-size: 12px; }
+  .output .oh { font-weight: bold; margin-bottom: 4px; color: #444; }
+  .output pre { font-family: Consolas, monospace; font-size: 12px; white-space: pre-wrap; color: #222; }
+  .output .copy { margin-top: 6px; padding: 3px 10px; border: 1px solid #1a73e8; background: #1a73e8; color: #fff; border-radius: 4px; cursor: pointer; font-size: 12px; }
+</style>
+</head>
+<body>
+
+<!-- ===== 左侧参数面板 ===== -->
+<div class="panel">
+  <h1>弹窗参数调整器</h1>
+  <div class="tip">拖动滑块实时预览，调好后复制下方参数代码发给我，我会改到脚本里。</div>
+
+  <div class="row"><div class="lab"><span>卡片宽度 W</span><span class="val" id="v-w">380</span></div><input type="range" id="p-w" min="280" max="560" step="5" value="380"></div>
+  <div class="row"><div class="lab"><span>卡片高度 H</span><span class="val" id="v-h">96</span></div><input type="range" id="p-h" min="80" max="220" step="5" value="96"></div>
+  <div class="row"><div class="lab"><span>标题字号</span><span class="val" id="v-ft">11</span></div><input type="range" id="p-ft" min="8" max="20" step="0.5" value="11"></div>
+  <div class="row"><div class="lab"><span>正文字号</span><span class="val" id="v-fb">9</span></div><input type="range" id="p-fb" min="7" max="16" step="0.5" value="9"></div>
+  <div class="row"><div class="lab"><span>标题左边距 PAD_X</span><span class="val" id="v-px">20</span></div><input type="range" id="p-px" min="10" max="40" step="1" value="20"></div>
+  <div class="row"><div class="lab"><span>标题上边距 PAD_TOP</span><span class="val" id="v-pt">14</span></div><input type="range" id="p-pt" min="6" max="40" step="1" value="14"></div>
+  <div class="row"><div class="lab"><span>正文上边距 BODY_TOP</span><span class="val" id="v-bt">46</span></div><input type="range" id="p-bt" min="30" max="120" step="1" value="46"></div>
+  <div class="row"><div class="lab"><span>正文区域高度 BODY_H</span><span class="val" id="v-bh">40</span></div><input type="range" id="p-bh" min="20" max="140" step="2" value="40"></div>
+  <div class="row"><div class="lab"><span>摘要截断长度（字）</span><span class="val" id="v-mc">60</span></div><input type="range" id="p-mc" min="20" max="120" step="5" value="60"></div>
+
+  <div class="tip" style="margin-top:10px; color:#c0392b;">提示：如果系统是 125%/150% 缩放，实际弹窗会按比例等比放大——先用默认值对比，觉得整体偏大就把字号调小 1~2。</div>
+</div>
+
+<!-- ===== 右侧预览区 ===== -->
+<div class="preview">
+  <div class="hint">模拟右下角弹窗（白底黑字 · 圆角 16px · 浅灰边框）</div>
+
+  <div id="card">
+    <div id="cardTitle">✅&nbsp;&nbsp;任务完成</div>
+    <div id="cardBody"></div>
+  </div>
+
+  <div class="output">
+    <div class="oh">📋 复制以下参数代码发给我：</div>
+    <pre id="out"></pre>
+    <button class="copy" onclick="copyOut()">复制参数</button>
+  </div>
+</div>
+
+<script>
+  // 模拟正文（两种场景轮换展示，点击卡片切换）
+  var SAMPLE_NEED = "请提供报错日志，我才能定位问题。建议同时附上运行环境与操作步骤，方便快速排查原因，我会给出修复方案。";
+  var SAMPLE_DONE = "已完成所有修改，共改动 3 个文件，测试全部通过。后续如需部署，请告诉我目标环境信息，我会给出完整命令。";
+  var mode = 0;
+
+  function truncate(s, n) { return s.length > n ? s.slice(0, n) + "…" : s; }
+
+  function update() {
+    var v = {
+      W: +document.getElementById('p-w').value,
+      H: +document.getElementById('p-h').value,
+      FT: +document.getElementById('p-ft').value,
+      FB: +document.getElementById('p-fb').value,
+      PX: +document.getElementById('p-px').value,
+      PT: +document.getElementById('p-pt').value,
+      BT: +document.getElementById('p-bt').value,
+      BH: +document.getElementById('p-bh').value,
+      MC: +document.getElementById('p-mc').value
+    };
+    // 更新数值显示
+    document.getElementById('v-w').textContent = v.W;
+    document.getElementById('v-h').textContent = v.H;
+    document.getElementById('v-ft').textContent = v.FT;
+    document.getElementById('v-fb').textContent = v.FB;
+    document.getElementById('v-px').textContent = v.PX;
+    document.getElementById('v-pt').textContent = v.PT;
+    document.getElementById('v-bt').textContent = v.BT;
+    document.getElementById('v-bh').textContent = v.BH;
+    document.getElementById('v-mc').textContent = v.MC;
+    // 应用到卡片
+    var c = document.getElementById('card');
+    c.style.setProperty('--w', v.W + 'px');
+    c.style.setProperty('--h', v.H + 'px');
+    c.style.setProperty('--fs-title', v.FT + 'pt');
+    c.style.setProperty('--fs-body', v.FB + 'pt');
+    c.style.setProperty('--pad-x', v.PX + 'px');
+    c.style.setProperty('--pad-top', v.PT + 'px');
+    c.style.setProperty('--body-top', v.BT + 'px');
+    c.style.setProperty('--body-h', v.BH + 'px');
+    // 正文截断
+    var sample = mode === 0 ? SAMPLE_NEED : SAMPLE_DONE;
+    document.getElementById('cardBody').textContent = truncate(sample, v.MC);
+    document.getElementById('cardTitle').textContent = (mode === 0 ? '❓  需要用户提供相关信息' : '✅  任务完成');
+    // 输出参数代码
+    document.getElementById('out').textContent =
+      '$W = ' + v.W + '        # 卡片宽度\n' +
+      '$H = ' + v.H + '        # 卡片高度\n' +
+      '$PAD_X = ' + v.PX + '   # 标题左边距\n' +
+      '$PAD_TOP = ' + v.PT + ' # 标题上边距\n' +
+      '$BODY_TOP = ' + v.BT + ' # 正文上边距\n' +
+      '$BODY_H = ' + v.BH + '   # 正文区域高度\n' +
+      '$F_TITLE = ' + v.FT + '  # 标题字号 (pt)\n' +
+      '$F_BODY = ' + v.FB + '   # 正文字号 (pt)\n' +
+      '$MAX_CHARS = ' + v.MC + ' # 摘要截断长度 (字)';
+  }
+
+  function copyOut() {
+    var t = document.getElementById('out').textContent;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(t).then(function () { alert('已复制！发给我即可'); });
+    } else {
+      var ta = document.createElement('textarea'); ta.value = t; document.body.appendChild(ta);
+      ta.select(); document.execCommand('copy'); document.body.removeChild(ta);
+      alert('已复制！发给我即可');
+    }
+  }
+
+  // 点击卡片切换 任务完成/需要信息 两种文案
+  document.getElementById('card').addEventListener('click', function () {
+    mode = 1 - mode; update();
+  });
+
+  // 所有滑块绑定
+  ['p-w','p-h','p-ft','p-fb','p-px','p-pt','p-bt','p-bh','p-mc'].forEach(function (id) {
+    document.getElementById(id).addEventListener('input', update);
+  });
+
+  update();
+</script>
+</body>
+</html>

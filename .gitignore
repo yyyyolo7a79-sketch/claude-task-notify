@@ -1,0 +1,10 @@
+# 本地备份
+*.bak
+
+# 临时文件
+*.tmp
+diag.ps1
+
+# 系统文件
+Thumbs.db
+Desktop.ini
