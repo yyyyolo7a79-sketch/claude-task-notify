@@ -7,13 +7,15 @@ description: 任务完成弹窗 — Claude Code 每次完成任务时右下角�
 
 ## 能力说明
 
-Claude Code 每次停止响应（任务回合结束）时，Windows 右下角自动弹出白色反馈卡片：
+Claude Code 的关键「等待/完成」时刻，Windows 右下角自动弹出白色反馈卡片：
 
-- ✅ **任务完成** — 若本次回复以问号结尾或包含请求词（"请提供…""需要你…"），则显示 ❓ **需要用户提供相关信息**
-- 正文附本次回复的摘要（首句，截断 180 字，自动换行）
-- 白色圆角卡片（黑字）、淡入淡出、8 秒自动消失、点击卡片或右上角 ✕ 立即关闭（无 Esc——无焦点窗口收不到键盘事件）
+- ✅ **任务完成**（Stop）— 若本次回复以问号结尾或包含请求词（"请提供…""需要你…"），则显示 ❓ **需要用户提供相关信息**；8 秒自动消失
+- ❓ **Claude 在等你回答**（提问时，PreToolUse:AskUserQuestion）— 正文附问题内容；**持久显示**，作答后自动关闭 / 手动关闭（安全阀 30 分钟）
+- ⏳ **Claude 在等你批准操作**（权限确认时，PermissionRequest）— 正文附工具名与命令摘要；持久显示，**批准后自动关闭** / 手动关闭（安全阀 30 分钟）
+- 正文自动清洗（截断 180 字、自动换行）；白色圆角卡片（黑字）、淡入淡出、点击卡片或右上角 ✕ 立即关闭（无 Esc——无焦点窗口收不到键盘事件）
+- 持久化开关：`/notify_AskUserQuestion_persistence true|false`（默认 true = 持久）
 
-**触发机制**：全局 `~/.claude/settings.json` 的 `Stop` hook → `~/.claude/scripts/notify-complete.ps1`（hook 命令必须是绝对解释器路径 + `-WindowStyle Hidden`，否则每次 Stop 闪现控制台窗口）。这是 **harness 层强制执行**，对**所有项目**生效，与模型行为无关——不需要本 skill 被触发，弹窗也照常出现。
+**触发机制**：全局 `~/.claude/settings.json` 的 4 类 hook（`Stop` / `PreToolUse:AskUserQuestion` / `PermissionRequest` / `PostToolUse:AskUserQuestion`）→ `~/.claude/scripts/notify-complete.ps1`（hook 命令必须是绝对解释器路径 + `-WindowStyle Hidden`，否则每次 Stop 闪现控制台窗口）。这是 **harness 层强制执行**，对**所有项目**生效，与模型行为无关——不需要本 skill 被触发，弹窗也照常出现。
 
 ## Claude 收尾行为规范（与弹窗判断配合）
 
@@ -30,6 +32,8 @@ Claude Code 每次停止响应（任务回合结束）时，Windows 右下角自
 用户说「测试弹窗」时执行（stdin 喂 Stop 事件 JSON）：
 
 ```powershell
+# $OutputEncoding 必须设 UTF-8：PS 5.1 默认 ASCII，管道中文会降级为 "?"
+$OutputEncoding = [Text.Encoding]::UTF8
 $evt = @{ session_id="test"; cwd=(Get-Location).Path; hook_event_name="Stop";
           stop_hook_active=$false; last_assistant_message="弹窗工作正常" } | ConvertTo-Json
 $evt | & "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "$HOME\.claude\scripts\notify-complete.ps1"

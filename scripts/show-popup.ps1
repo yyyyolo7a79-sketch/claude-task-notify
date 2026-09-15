@@ -4,7 +4,12 @@
 # 职责：
 #   1. 读取 payload 文件（-PayloadFile），读取后立即删除
 #   2. WPF（DirectWrite）渲染右下角非模态卡片弹窗
-#   3. hold 8 秒后淡出；点击卡片 / 右上角 ✕ 立即关闭（无 Esc——无焦点窗口收不到键盘）
+#   3. 关闭逻辑按 payload.persist 分流：
+#      · persist=false（任务完成类）：hold 8 秒后淡出
+#      · persist=true（等待类：提问/权限确认）：持久显示，直到——
+#        用户点击/✕ 关闭、或作答后入口写的 close 标志出现（自动淡出）、
+#        或安全阀 30 分钟到期
+#   4. 点击卡片 / 右上角 ✕ 立即关闭（无 Esc——无焦点窗口收不到键盘）
 #
 # 不抢焦点：ShowActivated=false；不阻塞：独立进程管理 UI 生命周期
 #
@@ -42,7 +47,9 @@ $BODY_H = 80    # 正文区域高度
 $F_TITLE = 12 * 1.3333     # 标题（≈12pt）
 $F_BODY = 10 * 1.3333      # 正文（≈10pt）
 $SHADOW_PAD = 30           # 阴影边距（窗口比卡片大一圈，否则阴影被裁剪）
-$DURATION_MS = 8000        # 显示时长 8 秒（规格 3.2）
+$DURATION_MS = 8000        # 非持久弹窗显示时长 8 秒（规格 3.2）
+$PERSIST_MAX_MS = 30 * 60 * 1000   # 持久弹窗安全阀：最长 30 分钟后自动淡出（防孤儿）
+$CLOSE_POLL_MS = 500       # 持久弹窗轮询"作答关闭标志"的间隔
 
 # 脱敏日志（与入口共用同一文件；实现与 notify-complete.ps1 保持同步）
 # 第六轮审查修复：命名 Mutex 串行化「检查→滚动→追加」；滚动用 SetLength(0) 截断
@@ -87,6 +94,8 @@ function Write-NotifyLog {
 # 读取 payload（读取后立即删除，即使渲染失败）
 # =============================================================
 $emoji = "✅"; $titleText = "任务完成"; $bodyText = "任务已完成，等待你的下一步操作。"; $project = ""
+$persist = $false          # 是否持久显示（payload.persist）
+$toolUseId = ""            # 等待类事件的 tool_use_id（拼 close 标志路径）
 
 # 审查修复：路径约束——只接受 %TEMP%\claude-code-notify\payload-<32hex>.json，
 # 防止脚本被误调用时删除任意 JSON 文件
@@ -115,11 +124,19 @@ try {
     if ($p.title) { $titleText = $p.title }
     if ($p.body) { $bodyText = $p.body }
     if ($p.project) { $project = $p.project }
+    if ($p.persist) { $persist = [bool]$p.persist }
+    if ($p.toolUseId) { $toolUseId = [string]$p.toolUseId }
     Write-NotifyLog "UI payload-ok"
 } catch {
     Write-NotifyLog "UI payload-invalid"
 } finally {
     Remove-Item $payloadPath -Force -ErrorAction SilentlyContinue
+}
+
+# 持久弹窗的"作答关闭"标志路径（PostToolUse 写入；格式校验防路径注入）
+$closeFlagPath = ""
+if ($toolUseId -match '^[A-Za-z0-9_-]{1,64}$') {
+    $closeFlagPath = Join-Path $DIR ("close-" + $toolUseId + ".flag")
 }
 
 # =============================================================
@@ -317,6 +334,9 @@ $win.Add_MouseLeftButtonDown({
 #   15 秒；DateTime 受系统校时影响，Stopwatch 不受）
 $script:phase = "in"
 $script:holdSw = [System.Diagnostics.Stopwatch]::StartNew()
+$script:lastPoll = 0L
+$script:persist = $persist
+$script:closeFlag = $closeFlagPath
 
 $animTimer = New-Object System.Windows.Threading.DispatcherTimer
 $animTimer.Interval = [TimeSpan]::FromMilliseconds(20)
@@ -329,7 +349,22 @@ $animTimer.Add_Tick({
             $script:holdSw.Restart()
         }
     } elseif ($script:phase -eq "hold") {
-        if ($script:holdSw.ElapsedMilliseconds -ge $DURATION_MS) {
+        if ($script:persist) {
+            # 持久模式：轮询作答关闭标志（500ms 间隔）→ 自动淡出；
+            #   安全阀：超过 $PERSIST_MAX_MS 仍未关闭则自动淡出（防孤儿弹窗）
+            if ($script:holdSw.ElapsedMilliseconds -ge $PERSIST_MAX_MS) {
+                Write-NotifyLog "UI persist-safety-timeout"
+                $script:phase = "out"
+            } elseif ($script:closeFlag -and
+                      (($script:holdSw.ElapsedMilliseconds - $script:lastPoll) -ge $CLOSE_POLL_MS)) {
+                $script:lastPoll = $script:holdSw.ElapsedMilliseconds
+                if (Test-Path $script:closeFlag) {
+                    Remove-Item $script:closeFlag -Force -ErrorAction SilentlyContinue
+                    Write-NotifyLog "UI persist-close-by-answer"
+                    $script:phase = "out"
+                }
+            }
+        } elseif ($script:holdSw.ElapsedMilliseconds -ge $DURATION_MS) {
             $script:phase = "out"
         }
     } elseif ($script:phase -eq "out") {
@@ -408,8 +443,12 @@ try {
         $winPhysW = [int](($W + 2 * $SHADOW_PAD) * $targetScale)
         $winPhysH = [int](($H + 2 * $SHADOW_PAD) * $targetScale)
         $marginPx = [int]($MARGIN * $targetScale)
-        $x = $mi.rcWork.R - $winPhysW - $marginPx
-        $y = $mi.rcWork.B - $winPhysH - $marginPx
+        # 第九轮修复：窗口比卡片大 SHADOW_PAD/边（透明阴影边距），窗口右下角须外扩
+        #   同量，卡片（而非窗口）才恰好距屏 MARGIN——与 WPF 初始位置
+        #   （Left = 工作区右 - W - MARGIN - SHADOW_PAD）语义一致
+        $padPx = [int]($SHADOW_PAD * $targetScale)
+        $x = $mi.rcWork.R - $winPhysW - $marginPx + $padPx
+        $y = $mi.rcWork.B - $winPhysH - $marginPx + $padPx
         if (-not [Win32Ext]::SetWindowPos($hwnd, [IntPtr]::Zero, $x, $y, $winPhysW, $winPhysH,
             ($SWP_NOACTIVATE -bor $SWP_NOZORDER))) {
             Write-NotifyLog "UI position-failed"

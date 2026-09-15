@@ -1,14 +1,18 @@
 ﻿# =============================================================
 # notify-complete.ps1 — Claude Code Stop Hook 入口（快速返回）
 #
-# 职责（按 Codex 弹窗规格适配）：
-#   1. 读取 stdin JSON，校验事件（仅 Stop 且 stop_hook_active=false）
+# 职责（按 Codex 弹窗规格适配 + 等待提醒扩展）：
+#   1. 读取 stdin JSON，校验事件——四类：Stop（主回复结束）/
+#      PreToolUse+AskUserQuestion（Claude 提问，等你回答）/
+#      PermissionRequest（权限确认，等你批准）/
+#      PostToolUse（AskUserQuestion 已作答 / 权限工具执行完成 → 写关闭标志）；其余忽略
 #   2. 生成摘要（本地确定性处理，不调模型）
 #   3. 2 秒去重（SHA-256 键 + state.json 原子替换）
 #   4. 写临时 payload，Start-Process 派生独立 UI 进程（show-popup.ps1）
 #   5. 500ms 内退出，绝不阻塞 Claude Code
 #
-# 输出：无 stdout（返回空 = 不干预 Claude 的停止行为）
+# 输出：无 stdout（返回空 = 不干预 Claude 行为；PreToolUse/PermissionRequest
+#       语义下"无决定" = 工具调用正常走权限流程，即不阻断也不放行）
 #
 # 注意：UTF-8 with BOM 保存；PowerShell 5.1 对无 BOM 文件按 ANSI 解释
 # =============================================================
@@ -29,6 +33,15 @@ $MAX_CHARS = 180       # 摘要截断长度（字；与弹窗参数调整器的 
 # 可移植路径：UI 脚本与入口同目录（$PSScriptRoot），解释器用绝对路径（防 PATH 劫持）
 $SHOW_POPUP = Join-Path $PSScriptRoot 'show-popup.ps1'
 $PS_EXE = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+# 用户配置（/notify_AskUserQuestion_persistence 命令维护；文件不存在 = 默认持久开启）
+$CONFIG_FILE = Join-Path $PSScriptRoot 'notify-config.json'
+$persistQuestion = $true
+try {
+    if (Test-Path $CONFIG_FILE) {
+        $cfg = Get-Content -Raw $CONFIG_FILE -Encoding UTF8 | ConvertFrom-Json
+        if ($null -ne $cfg.askUserQuestionPersistence) { $persistQuestion = [bool]$cfg.askUserQuestionPersistence }
+    }
+} catch { }
 
 # =============================================================
 # 辅助函数
@@ -185,7 +198,12 @@ function Test-Dedupe {
         if (Test-Path $STATE_FILE) {
             try {
                 $st = Get-Content -Raw $STATE_FILE -Encoding UTF8 | ConvertFrom-Json
-                $elapsed = ($now - [DateTime]::Parse($st.ts)).TotalMilliseconds
+                # 第九轮修复：RoundtripKind 保留 "…Z" 的 UTC 语义——原 [DateTime]::Parse
+                #   把带 Z 的 UTC 时间戳转换为本地时间（Kind=Local），与 UtcNow 相减
+                #   得 -8h（中国时区）→ elapsed 恒负 → 去重永不生效
+                $tsUtc = [DateTime]::Parse($st.ts, [System.Globalization.CultureInfo]::InvariantCulture,
+                    [System.Globalization.DateTimeStyles]::RoundtripKind)
+                $elapsed = ($now - $tsUtc).TotalMilliseconds
                 # 第四轮审查修复：elapsed >= 0 防御时钟回拨/未来时间戳导致的异常抑制
                 if ($st.key -eq $key -and $elapsed -ge 0 -and $elapsed -lt $DEDUPE_MS) {
                     return $true
@@ -207,10 +225,15 @@ function Test-Dedupe {
     }
 }
 
-# 清理超过 10 分钟未被 UI 读取的旧 payload
+# 清理超过 10 分钟未被 UI 读取的旧 payload + 无人消费的旧关闭标志
 function Clear-StalePayloads {
     try {
         Get-ChildItem "$DIR\payload-*.json" -ErrorAction SilentlyContinue | ForEach-Object {
+            if ((Get-Date) - $_.LastWriteTime -gt [TimeSpan]::FromMinutes($PAYLOAD_TTL)) {
+                Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
+            }
+        }
+        Get-ChildItem "$DIR\close-*.flag" -ErrorAction SilentlyContinue | ForEach-Object {
             if ((Get-Date) - $_.LastWriteTime -gt [TimeSpan]::FromMinutes($PAYLOAD_TTL)) {
                 Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
             }
@@ -237,39 +260,95 @@ try {
     exit 0
 }
 
-# 过滤：仅主 Agent 的 Stop 事件
-if ($data.hook_event_name -ne "Stop") {
-    Write-NotifyLog ("SKIP event=" + $data.hook_event_name + " sid=" + ($data.session_id -replace '(.{8}).*', '$1'))
+# 过滤：仅四类事件——Stop（主回复结束）/
+# PreToolUse+AskUserQuestion（提问，等你回答）/ PermissionRequest（等你批准）/
+# PostToolUse（AskUserQuestion 已作答 / 权限工具执行完成 → 写关闭标志）
+$evtName = [string]$data.hook_event_name
+$isStop = ($evtName -eq "Stop")
+$isQuestion = ($evtName -eq "PreToolUse" -and $data.tool_name -eq "AskUserQuestion")
+# 注：AskUserQuestion 自身也会触发 PermissionRequest（工具级决策噪音）——跳过它，
+#   该场景已由 question 弹窗覆盖；其余工具的权限请求保留
+$isPermission = ($evtName -eq "PermissionRequest" -and $data.tool_name -ne "AskUserQuestion")
+$isPostToolUse = ($evtName -eq "PostToolUse")   # matcher 层已限定工具范围（AskUserQuestion / Bash|Edit|Write|...）
+if (-not ($isStop -or $isQuestion -or $isPermission -or $isPostToolUse)) {
+    Write-NotifyLog ("SKIP event=" + $evtName + " tool=" + $data.tool_name + " sid=" + ($data.session_id -replace '(.{8}).*', '$1'))
     exit 0
 }
-if ($data.stop_hook_active) {
+if ($isStop -and $data.stop_hook_active) {
     # 防止 Stop Hook 自身触发导致的递归
     Write-NotifyLog ("SKIP stop_hook_active sid=" + ($data.session_id -replace '(.{8}).*', '$1'))
     exit 0
 }
-# 后台任务仍在运行时：不显示"任务完成"（避免误导），但也不跳过——
-# 后台任务结束后未必再次触发 Stop，跳过会导致永远没有通知。
-# 改为：标题显示"主回复完成"，并在日志标注 bg=1
+
+# PostToolUse 统一处理：写关闭标志让对应持久弹窗自动淡出
+#   · AskUserQuestion 已作答 → 关闭提问弹窗
+#   · 权限批准后工具执行完成 → 关闭权限弹窗（同一 tool_use_id）
+#   （标志名含 tool_use_id，仅接受 ^[A-Za-z0-9_-]{1,64}$ 防路径注入）
+if ($isPostToolUse) {
+    try {
+        $tuid = [string]$data.tool_use_id
+        if ($tuid -match '^[A-Za-z0-9_-]{1,64}$') {
+            if (-not (Test-Path $DIR)) { $null = New-Item -ItemType Directory -Force $DIR }
+            Set-Content -Path (Join-Path $DIR ("close-" + $tuid + ".flag")) -Value "1" -Encoding UTF8
+            Write-NotifyLog ("OK evt=tool-done tool=" + $data.tool_name + " sid=" + ($data.session_id -replace '(.{8}).*', '$1'))
+        }
+    } catch { }
+    exit 0
+}
+# 内容获取 + 标题（按事件类型分支）
 $hasBg = $false
-if ($data.background_tasks -and @($data.background_tasks).Count -gt 0) { $hasBg = $true }
-
-# 内容获取：优先 last_assistant_message，缺失则读 transcript 兜底
-$rawText = $data.last_assistant_message
-if (-not $rawText -and $data.transcript_path) {
-    $rawText = Get-LastAssistantFromTranscript -path $data.transcript_path
-}
-if (-not $rawText) { $rawText = "任务已完成，等待你的下一步操作。" }
-
-# 摘要 + 类型 + 项目名
-$bodyText = Get-Summary -t $rawText
-$isNeedInfo = Test-NeedInfo -t $rawText
-if ($isNeedInfo) {
-    $emoji = "❓"; $titleText = "需要用户提供相关信息"
-} elseif ($hasBg) {
-    $emoji = "⏳"; $titleText = "主回复完成，后台任务运行中"
+$isNeedInfo = $false
+$persist = $false      # 弹窗是否持久显示（等待类事件 + 配置开启）
+$tuid = ""             # tool_use_id（供持久弹窗轮询关闭标志）
+if ($isQuestion) {
+    # 提问事件：正文显示第一个问题的文本（多问时标注数量）
+    $qList = @($data.tool_input.questions)
+    $rawText = ""
+    if ($qList.Count -ge 1 -and $qList[0].question) { $rawText = [string]$qList[0].question }
+    if ($qList.Count -gt 1) { $rawText = "（共 $($qList.Count) 个问题）" + $rawText }
+    if (-not $rawText) { $rawText = "Claude 向你提出了问题，请回到窗口查看并选择。" }
+    $emoji = "❓"; $titleText = "Claude 在等你回答"
+    $persist = $persistQuestion
+    if ([string]$data.tool_use_id -match '^[A-Za-z0-9_-]{1,64}$') { $tuid = [string]$data.tool_use_id }
+} elseif ($isPermission) {
+    # 权限确认事件：正文显示工具名 + 关键参数（command/file_path 等）
+    $toolName = [string]$data.tool_name
+    $detail = ""
+    try {
+        $ti = $data.tool_input
+        if ($ti.command) { $detail = [string]$ti.command }
+        elseif ($ti.file_path) { $detail = [string]$ti.file_path }
+        elseif ($ti.pattern) { $detail = [string]$ti.pattern }
+        elseif ($ti.url) { $detail = [string]$ti.url }
+    } catch { }
+    if ($detail) { $rawText = $toolName + " " + $detail } else { $rawText = $toolName }
+    $emoji = "⏳"; $titleText = "Claude 在等你批准操作"
+    $persist = $persistQuestion
+    # 权限批准后，该工具的 PostToolUse 会带同一 tool_use_id → 写关闭标志自动关
+    if ([string]$data.tool_use_id -match '^[A-Za-z0-9_-]{1,64}$') { $tuid = [string]$data.tool_use_id }
 } else {
-    $emoji = "✅"; $titleText = "任务完成"
+    # Stop 事件（原逻辑）：优先 last_assistant_message，缺失则读 transcript 兜底
+    $rawText = $data.last_assistant_message
+    if (-not $rawText -and $data.transcript_path) {
+        $rawText = Get-LastAssistantFromTranscript -path $data.transcript_path
+    }
+    if (-not $rawText) { $rawText = "任务已完成，等待你的下一步操作。" }
+    # 后台任务仍在运行时：不显示"任务完成"（避免误导），但也不跳过——
+    # 后台任务结束后未必再次触发 Stop，跳过会导致永远没有通知。
+    # 改为：标题显示"主回复完成"，并在日志标注 bg=1
+    if ($data.background_tasks -and @($data.background_tasks).Count -gt 0) { $hasBg = $true }
+    $isNeedInfo = Test-NeedInfo -t $rawText
+    if ($isNeedInfo) {
+        $emoji = "❓"; $titleText = "需要用户提供相关信息"
+    } elseif ($hasBg) {
+        $emoji = "⏳"; $titleText = "主回复完成，后台任务运行中"
+    } else {
+        $emoji = "✅"; $titleText = "任务完成"
+    }
 }
+
+# 摘要 + 项目名
+$bodyText = Get-Summary -t $rawText
 $project = ""
 if ($data.cwd) { $project = Split-Path $data.cwd -Leaf }
 
@@ -289,6 +368,8 @@ try {
         body       = $bodyText
         project    = $project
         background = $hasBg
+        persist    = $persist
+        toolUseId  = $tuid
         sessionId  = $data.session_id
         createdAt  = (Get-Date -Format "o")
     } | ConvertTo-Json | Set-Content $payloadFile -Encoding UTF8
@@ -312,9 +393,10 @@ try {
     exit 0
 }
 
-# 清理旧 payload + 日志（dur 为入口实际耗时，验证 500ms 内返回）
+# 清理旧 payload + 日志（dur 为入口实际耗时，验证 500ms 内返回；evt 标记事件类型）
 Clear-StalePayloads
-Write-NotifyLog ("OK adapter=wpf need_info=" + $isNeedInfo + " bg=" + $hasBg +
+$evtTag = if ($isQuestion) { "question" } elseif ($isPermission) { "permission" } else { "stop" }
+Write-NotifyLog ("OK adapter=wpf evt=" + $evtTag + " need_info=" + $isNeedInfo + " bg=" + $hasBg +
     " dur=" + $sw.ElapsedMilliseconds + "ms sid=" + ($data.session_id -replace '(.{8}).*', '$1'))
 
 exit 0
