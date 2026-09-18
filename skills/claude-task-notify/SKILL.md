@@ -15,7 +15,7 @@ Claude Code 的关键「等待/完成」时刻，Windows 右下角自动弹出�
 - 正文自动清洗（截断 180 字、自动换行）；白色圆角卡片（黑字）、淡入淡出、点击卡片或右上角 ✕ 立即关闭（无 Esc——无焦点窗口收不到键盘事件）
 - 持久化开关：`/notify_AskUserQuestion_persistence true|false`（默认 true = 持久）
 
-**触发机制**：全局 `~/.claude/settings.json` 的 4 类 hook（`Stop` / `PreToolUse:AskUserQuestion` / `PermissionRequest` / `PostToolUse:AskUserQuestion`）→ `~/.claude/scripts/notify-complete.ps1`（hook 命令必须是绝对解释器路径 + `-WindowStyle Hidden`，否则每次 Stop 闪现控制台窗口）。这是 **harness 层强制执行**，对**所有项目**生效，与模型行为无关——不需要本 skill 被触发，弹窗也照常出现。
+**触发机制**：全局 `~/.claude/settings.json` 的 6 类 hook（弹窗：`Stop` / `PreToolUse:AskUserQuestion` / `PermissionRequest`；关闭信号：`PostToolUse` / `PostToolUseFailure` / `PermissionDenied`）→ `~/.claude/scripts/notify-complete.ps1`（hook 命令必须是绝对解释器路径 + `-WindowStyle Hidden`，否则每次 Stop 闪现控制台窗口）。等待类弹窗的自动关闭为双通道匹配（工具调用 ID + 工具参数内容指纹——PermissionRequest 官方设计不含 ID，指纹是权限弹窗的唯一关联键），且仅在弹窗存活（waiting 握手存在）时写信号。这是 **harness 层强制执行**，对**所有项目**生效，与模型行为无关——不需要本 skill 被触发，弹窗也照常出现。
 
 ## Claude 收尾行为规范（与弹窗判断配合）
 
@@ -49,6 +49,7 @@ $evt | & "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile
 | 弹窗不出现 | 看日志 `%TEMP%\claude-code-notify\notify.log`：`SKIP`=被过滤（子代理/权限/递归）、`DEDUPE`=2秒内重复、`ERR`=输入/派生失败 |
 | 中文乱码 | `notify-complete.ps1` / `show-popup.ps1` 必须是 **UTF-8 with BOM**（PS 5.1 对无 BOM 的 UTF-8 按 ANSI/GBK 解释） |
 | 与系统通知重复弹 | 在 `/config` 中关闭 Claude Code 内置通知（hooks 弹窗与系统通知互不抑制） |
+| 等待弹窗没自动关 | 看 `%TEMP%\claude-code-notify\`：`waiting-*.flag` 在 = 弹窗还活着等信号；日志 `ch=` 空 = 无等待者（正常）、`ch=id/ck`（写了关闭信号）后应紧跟 `persist-close-by-answer`；工具被拒绝的极罕见场景退化为手动关 |
 | 想临时关闭 | 删除 `settings.json` 中 `hooks` 键即可（脚本可保留） |
 
 ## 卸载

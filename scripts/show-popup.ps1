@@ -9,6 +9,10 @@
 #      · persist=true（等待类：提问/权限确认）：持久显示，直到——
 #        用户点击/✕ 关闭、或作答后入口写的 close 标志出现（自动淡出）、
 #        或安全阀 30 分钟到期
+#      · 双通道关闭标志：① close-<tool_use_id>.flag（PreToolUse 类有 id）
+#        ② close-k<内容指纹>.flag（PermissionRequest 无 tool_use_id 时的唯一通道）
+#      · waiting 握手：弹窗存活期间写 waiting-*.flag，入口只在等待者存在时才写
+#        close（不产生无消费者的垃圾标志文件）；退出时（任意路径）清理
 #   4. 点击卡片 / 右上角 ✕ 立即关闭（无 Esc——无焦点窗口收不到键盘）
 #
 # 不抢焦点：ShowActivated=false；不阻塞：独立进程管理 UI 生命周期
@@ -26,6 +30,7 @@ try { [Console]::InputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 # 脚本级总兜底：Add-Type/WPF 初始化等任何未捕获异常都记日志（不静默退出）
 trap {
     try { Write-NotifyLog ("UI fatal: " + $_.Exception.GetType().Name) } catch { }
+    try { foreach ($wp in $waitingPaths) { Remove-Item $wp -Force -ErrorAction SilentlyContinue } } catch { }
     exit 1
 }
 
@@ -95,7 +100,8 @@ function Write-NotifyLog {
 # =============================================================
 $emoji = "✅"; $titleText = "任务完成"; $bodyText = "任务已完成，等待你的下一步操作。"; $project = ""
 $persist = $false          # 是否持久显示（payload.persist）
-$toolUseId = ""            # 等待类事件的 tool_use_id（拼 close 标志路径）
+$toolUseId = ""            # 等待类事件的 tool_use_id（通道①；PermissionRequest 没有）
+$contentKey = ""           # 内容指纹（通道②——权限弹窗的唯一关联键）
 
 # 审查修复：路径约束——只接受 %TEMP%\claude-code-notify\payload-<32hex>.json，
 # 防止脚本被误调用时删除任意 JSON 文件
@@ -126,6 +132,7 @@ try {
     if ($p.project) { $project = $p.project }
     if ($p.persist) { $persist = [bool]$p.persist }
     if ($p.toolUseId) { $toolUseId = [string]$p.toolUseId }
+    if ($p.contentKey) { $contentKey = [string]$p.contentKey }
     Write-NotifyLog "UI payload-ok"
 } catch {
     Write-NotifyLog "UI payload-invalid"
@@ -133,10 +140,29 @@ try {
     Remove-Item $payloadPath -Force -ErrorAction SilentlyContinue
 }
 
-# 持久弹窗的"作答关闭"标志路径（PostToolUse 写入；格式校验防路径注入）
-$closeFlagPath = ""
+# 持久弹窗的"作答关闭"标志路径（入口在工具完成/失败/被拒时写入；格式校验防路径注入）
+# 双通道：① tool_use_id（PreToolUse/PostToolUse 有；PermissionRequest 没有）
+#         ② contentKey 内容指纹（tool_name+tool_input 哈希）——权限弹窗唯一关联键
+$closeFlagPaths = @()
 if ($toolUseId -match '^[A-Za-z0-9_-]{1,64}$') {
-    $closeFlagPath = Join-Path $DIR ("close-" + $toolUseId + ".flag")
+    $closeFlagPaths += (Join-Path $DIR ("close-" + $toolUseId + ".flag"))
+}
+if ($contentKey -match '^[0-9a-f]{16}$') {
+    $closeFlagPaths += (Join-Path $DIR ("close-k" + $contentKey + ".flag"))
+}
+# waiting 握手：弹窗存活期间存在；入口只在 waiting 存在时才写 close（无等待者不产生垃圾）。
+# 在窗口显示前写入——保证"用户能看到弹窗 ⇒ waiting 已就位"，不存在批准快于握手的竞态
+$waitingPaths = @()
+if ($toolUseId -match '^[A-Za-z0-9_-]{1,64}$') {
+    $waitingPaths += (Join-Path $DIR ("waiting-" + $toolUseId + ".flag"))
+}
+if ($contentKey -match '^[0-9a-f]{16}$') {
+    $waitingPaths += (Join-Path $DIR ("waiting-k" + $contentKey + ".flag"))
+}
+if ($persist) {
+    foreach ($wp in $waitingPaths) {
+        try { Set-Content -Path $wp -Value "1" -Encoding UTF8 } catch { }
+    }
 }
 
 # =============================================================
@@ -336,7 +362,7 @@ $script:phase = "in"
 $script:holdSw = [System.Diagnostics.Stopwatch]::StartNew()
 $script:lastPoll = 0L
 $script:persist = $persist
-$script:closeFlag = $closeFlagPath
+$script:closeFlags = $closeFlagPaths
 
 $animTimer = New-Object System.Windows.Threading.DispatcherTimer
 $animTimer.Interval = [TimeSpan]::FromMilliseconds(20)
@@ -350,18 +376,21 @@ $animTimer.Add_Tick({
         }
     } elseif ($script:phase -eq "hold") {
         if ($script:persist) {
-            # 持久模式：轮询作答关闭标志（500ms 间隔）→ 自动淡出；
+            # 持久模式：轮询作答关闭标志（双通道，500ms 间隔）→ 自动淡出；
             #   安全阀：超过 $PERSIST_MAX_MS 仍未关闭则自动淡出（防孤儿弹窗）
             if ($script:holdSw.ElapsedMilliseconds -ge $PERSIST_MAX_MS) {
                 Write-NotifyLog "UI persist-safety-timeout"
                 $script:phase = "out"
-            } elseif ($script:closeFlag -and
+            } elseif ($script:closeFlags.Count -gt 0 -and
                       (($script:holdSw.ElapsedMilliseconds - $script:lastPoll) -ge $CLOSE_POLL_MS)) {
                 $script:lastPoll = $script:holdSw.ElapsedMilliseconds
-                if (Test-Path $script:closeFlag) {
-                    Remove-Item $script:closeFlag -Force -ErrorAction SilentlyContinue
-                    Write-NotifyLog "UI persist-close-by-answer"
-                    $script:phase = "out"
+                foreach ($fp in $script:closeFlags) {
+                    if (Test-Path $fp) {
+                        Remove-Item $fp -Force -ErrorAction SilentlyContinue
+                        Write-NotifyLog "UI persist-close-by-answer"
+                        $script:phase = "out"
+                        break
+                    }
                 }
             }
         } elseif ($script:holdSw.ElapsedMilliseconds -ge $DURATION_MS) {
@@ -462,6 +491,12 @@ try {
     # 顶层兜底：任何 UI 初始化/渲染失败都不静默退出，记日志便于诊断
     Write-NotifyLog ("UI render-error: " + $_.Exception.GetType().Name)
     exit 1
+} finally {
+    # 清理 waiting 握手文件（覆盖所有退出路径：手动关/自动关/安全阀/渲染异常）；
+    # 进程被强杀等崩溃残留由入口的 $WAITING_TTL 兜底
+    foreach ($wp in $waitingPaths) {
+        Remove-Item $wp -Force -ErrorAction SilentlyContinue
+    }
 }
 
 exit 0

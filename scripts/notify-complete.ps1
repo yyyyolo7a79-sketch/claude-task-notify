@@ -2,10 +2,11 @@
 # notify-complete.ps1 — Claude Code Stop Hook 入口（快速返回）
 #
 # 职责（按 Codex 弹窗规格适配 + 等待提醒扩展）：
-#   1. 读取 stdin JSON，校验事件——四类：Stop（主回复结束）/
+#   1. 读取 stdin JSON，校验事件——弹窗类：Stop（主回复结束）/
 #      PreToolUse+AskUserQuestion（Claude 提问，等你回答）/
-#      PermissionRequest（权限确认，等你批准）/
-#      PostToolUse（AskUserQuestion 已作答 / 权限工具执行完成 → 写关闭标志）；其余忽略
+#      PermissionRequest（权限确认，等你批准）；
+#      关闭信号类：PostToolUse / PostToolUseFailure / PermissionDenied
+#      （工具成功/失败/被拒 → 按双通道 tool_use_id + 内容指纹关弹窗）；其余忽略
 #   2. 生成摘要（本地确定性处理，不调模型）
 #   3. 2 秒去重（SHA-256 键 + state.json 原子替换）
 #   4. 写临时 payload，Start-Process 派生独立 UI 进程（show-popup.ps1）
@@ -28,7 +29,8 @@ $STATE_FILE = "$DIR\state.json"
 $LOG_FILE = "$DIR\notify.log"
 $LOG_MAX = 200KB
 $DEDUPE_MS = 2000      # 去重窗口
-$PAYLOAD_TTL = 10      # payload 清理阈值（分钟）
+$PAYLOAD_TTL = 10      # payload / 关闭标志清理阈值（分钟）
+$WAITING_TTL = 40      # waiting 握手文件清理阈值（分钟；须大于弹窗安全阀 30）
 $MAX_CHARS = 180       # 摘要截断长度（字；与弹窗参数调整器的 MAX_CHARS 滑块对应）
 # 可移植路径：UI 脚本与入口同目录（$PSScriptRoot），解释器用绝对路径（防 PATH 劫持）
 $SHOW_POPUP = Join-Path $PSScriptRoot 'show-popup.ps1'
@@ -95,6 +97,26 @@ function Get-Sha256Hex {
         $h = $hash.ComputeHash($bytes)
         return (($h | ForEach-Object { $_.ToString("x2") }) -join "")
     } finally { $hash.Dispose() }
+}
+
+# 内容指纹：tool_name + tool_input 的确定性哈希（前 16 hex）
+# 用途：PermissionRequest 事件没有 tool_use_id（官方设计，2026-09 文档确证）——
+#   权限弹窗无法用 id 关联"批准后工具完成"的关闭信号；改用内容指纹作第二通道：
+#   PermissionRequest 与 PostToolUse 收到同一工具调用的同一 tool_input，
+#   两端各自计算必然一致 → 弹窗按指纹轮询关闭标志
+# 确定性保证：属性按名排序 + [string] 字符串化（同机同 PS 版本两端一致）
+function Get-ContentKey {
+    param($toolName, $toolInput)
+    try {
+        $pairs = @()
+        if ($toolInput) {
+            $toolInput.PSObject.Properties | Sort-Object Name | ForEach-Object {
+                $pairs += ($_.Name + "=" + [string]$_.Value)
+            }
+        }
+        $raw = [string]$toolName + "`n" + ($pairs -join "`n")
+        return (Get-Sha256Hex -s $raw).Substring(0, 16)
+    } catch { return "" }
 }
 
 # 从 transcript（JSONL）尾部取最后一条 assistant 文本（兜底）
@@ -225,7 +247,7 @@ function Test-Dedupe {
     }
 }
 
-# 清理超过 10 分钟未被 UI 读取的旧 payload + 无人消费的旧关闭标志
+# 清理：超时未读的 payload、无人消费的关闭标志、崩溃残留的 waiting 握手文件
 function Clear-StalePayloads {
     try {
         Get-ChildItem "$DIR\payload-*.json" -ErrorAction SilentlyContinue | ForEach-Object {
@@ -235,6 +257,12 @@ function Clear-StalePayloads {
         }
         Get-ChildItem "$DIR\close-*.flag" -ErrorAction SilentlyContinue | ForEach-Object {
             if ((Get-Date) - $_.LastWriteTime -gt [TimeSpan]::FromMinutes($PAYLOAD_TTL)) {
+                Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
+            }
+        }
+        # waiting 握手文件：正常路径由 UI 退出时清理；此处只兜崩溃残留（TTL 须大于安全阀 30 分钟）
+        Get-ChildItem "$DIR\waiting-*.flag" -ErrorAction SilentlyContinue | ForEach-Object {
+            if ((Get-Date) - $_.LastWriteTime -gt [TimeSpan]::FromMinutes($WAITING_TTL)) {
                 Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
             }
         }
@@ -260,17 +288,19 @@ try {
     exit 0
 }
 
-# 过滤：仅四类事件——Stop（主回复结束）/
-# PreToolUse+AskUserQuestion（提问，等你回答）/ PermissionRequest（等你批准）/
-# PostToolUse（AskUserQuestion 已作答 / 权限工具执行完成 → 写关闭标志）
+# 过滤：弹窗类——Stop（主回复结束）/
+# PreToolUse+AskUserQuestion（提问，等你回答）/ PermissionRequest（等你批准）；
+# 关闭信号类——PostToolUse（成功）/ PostToolUseFailure（失败）/ PermissionDenied（被拒），
+#   三者输入都含 tool_name + tool_input，按双通道关对应弹窗
 $evtName = [string]$data.hook_event_name
 $isStop = ($evtName -eq "Stop")
 $isQuestion = ($evtName -eq "PreToolUse" -and $data.tool_name -eq "AskUserQuestion")
 # 注：AskUserQuestion 自身也会触发 PermissionRequest（工具级决策噪音）——跳过它，
 #   该场景已由 question 弹窗覆盖；其余工具的权限请求保留
 $isPermission = ($evtName -eq "PermissionRequest" -and $data.tool_name -ne "AskUserQuestion")
-$isPostToolUse = ($evtName -eq "PostToolUse")   # matcher 层已限定工具范围（AskUserQuestion / Bash|Edit|Write|...）
-if (-not ($isStop -or $isQuestion -or $isPermission -or $isPostToolUse)) {
+$isCloseSignal = ($evtName -eq "PostToolUse" -or $evtName -eq "PostToolUseFailure" -or
+                 $evtName -eq "PermissionDenied")   # matcher 层已限定工具范围
+if (-not ($isStop -or $isQuestion -or $isPermission -or $isCloseSignal)) {
     Write-NotifyLog ("SKIP event=" + $evtName + " tool=" + $data.tool_name + " sid=" + ($data.session_id -replace '(.{8}).*', '$1'))
     exit 0
 }
@@ -280,18 +310,29 @@ if ($isStop -and $data.stop_hook_active) {
     exit 0
 }
 
-# PostToolUse 统一处理：写关闭标志让对应持久弹窗自动淡出
+# 关闭信号处理（PostToolUse / PostToolUseFailure / PermissionDenied）：
 #   · AskUserQuestion 已作答 → 关闭提问弹窗
-#   · 权限批准后工具执行完成 → 关闭权限弹窗（同一 tool_use_id）
-#   （标志名含 tool_use_id，仅接受 ^[A-Za-z0-9_-]{1,64}$ 防路径注入）
-if ($isPostToolUse) {
+#   · 权限批准后工具执行完成/失败、或自动拒绝 → 关闭权限弹窗
+# 双通道（弹窗存活时先写 waiting-*.flag 握手，入口仅在等待者存在时才写 close，无等待者不产生文件）：
+#   ① tool_use_id：PostToolUse 等事件有（PermissionRequest 没有 → 权限弹窗无此通道）
+#   ② 内容指纹：tool_name+tool_input 哈希（PermissionRequest 唯一可用的关联键）
+if ($isCloseSignal) {
     try {
+        if (-not (Test-Path $DIR)) { $null = New-Item -ItemType Directory -Force $DIR }
+        $ch = @()
         $tuid = [string]$data.tool_use_id
-        if ($tuid -match '^[A-Za-z0-9_-]{1,64}$') {
-            if (-not (Test-Path $DIR)) { $null = New-Item -ItemType Directory -Force $DIR }
+        $ck = Get-ContentKey -toolName $data.tool_name -toolInput $data.tool_input
+        # id 通道优先；命中即不再写指纹通道（同一弹窗双通道各写一个 close 会残留一个）
+        if ($tuid -match '^[A-Za-z0-9_-]{1,64}$' -and
+            (Test-Path (Join-Path $DIR ("waiting-" + $tuid + ".flag")))) {
             Set-Content -Path (Join-Path $DIR ("close-" + $tuid + ".flag")) -Value "1" -Encoding UTF8
-            Write-NotifyLog ("OK evt=tool-done tool=" + $data.tool_name + " sid=" + ($data.session_id -replace '(.{8}).*', '$1'))
+            $ch += "id"
+        } elseif ($ck -and (Test-Path (Join-Path $DIR ("waiting-k" + $ck + ".flag")))) {
+            Set-Content -Path (Join-Path $DIR ("close-k" + $ck + ".flag")) -Value "1" -Encoding UTF8
+            $ch += "ck"
         }
+        # ch 为空 = 无弹窗在等（不产生垃圾标志文件）
+        Write-NotifyLog ("OK evt=tool-done tool=" + $data.tool_name + " ch=" + ($ch -join "+") + " sid=" + ($data.session_id -replace '(.{8}).*', '$1'))
     } catch { }
     exit 0
 }
@@ -299,7 +340,8 @@ if ($isPostToolUse) {
 $hasBg = $false
 $isNeedInfo = $false
 $persist = $false      # 弹窗是否持久显示（等待类事件 + 配置开启）
-$tuid = ""             # tool_use_id（供持久弹窗轮询关闭标志）
+$tuid = ""             # tool_use_id（双通道①——PreToolUse 有；PermissionRequest 没有）
+$contentKey = ""       # 内容指纹（双通道②——权限弹窗的唯一关联键）
 if ($isQuestion) {
     # 提问事件：正文显示第一个问题的文本（多问时标注数量）
     $qList = @($data.tool_input.questions)
@@ -310,6 +352,7 @@ if ($isQuestion) {
     $emoji = "❓"; $titleText = "Claude 在等你回答"
     $persist = $persistQuestion
     if ([string]$data.tool_use_id -match '^[A-Za-z0-9_-]{1,64}$') { $tuid = [string]$data.tool_use_id }
+    $contentKey = Get-ContentKey -toolName $data.tool_name -toolInput $data.tool_input
 } elseif ($isPermission) {
     # 权限确认事件：正文显示工具名 + 关键参数（command/file_path 等）
     $toolName = [string]$data.tool_name
@@ -324,8 +367,10 @@ if ($isQuestion) {
     if ($detail) { $rawText = $toolName + " " + $detail } else { $rawText = $toolName }
     $emoji = "⏳"; $titleText = "Claude 在等你批准操作"
     $persist = $persistQuestion
-    # 权限批准后，该工具的 PostToolUse 会带同一 tool_use_id → 写关闭标志自动关
+    # PermissionRequest 没有 tool_use_id（官方设计）→ 主要靠内容指纹通道：
+    #   批准后该工具的 PostToolUse 携带同一 tool_input → 指纹一致 → 自动关
     if ([string]$data.tool_use_id -match '^[A-Za-z0-9_-]{1,64}$') { $tuid = [string]$data.tool_use_id }
+    $contentKey = Get-ContentKey -toolName $data.tool_name -toolInput $data.tool_input
 } else {
     # Stop 事件（原逻辑）：优先 last_assistant_message，缺失则读 transcript 兜底
     $rawText = $data.last_assistant_message
@@ -370,6 +415,7 @@ try {
         background = $hasBg
         persist    = $persist
         toolUseId  = $tuid
+        contentKey = $contentKey
         sessionId  = $data.session_id
         createdAt  = (Get-Date -Format "o")
     } | ConvertTo-Json | Set-Content $payloadFile -Encoding UTF8
