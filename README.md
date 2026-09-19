@@ -1,120 +1,111 @@
-# Claude Code 任务完成弹窗（claude-task-notify）
+<div align="center">
 
-> 让 Claude Code **每次完成任务**时，在 Windows 右下角弹出 ChatGPT 桌面端风格的反馈卡片——✅ 任务完成 / ❓ 需要用户提供相关信息，附带本次回复摘要。
+**Language / 语言 / 語言 / 言語 / 언어**
 
-## ✨ 功能
+[**English**](README.md) | [简体中文](README.zh-CN.md) | [繁體中文](docs/zh-TW/README.md) | [日本語](docs/ja-JP/README.md) | [한국어](docs/ko-KR/README.md)
 
-- **强制生效**：由 Claude Code 的 `Stop` hook 触发（harness 层执行），每次 Claude 停止响应必然弹窗，不依赖模型自觉
-- **智能反馈**：自动分析本次回复——以问号结尾或包含请求词（"请提供…""需要你…"）→ ❓「需要用户提供相关信息」；否则 → ✅「任务完成」
-- **回复摘要**：正文显示本次回复首句（默认截断 180 字），自动清洗代码块/HTML 标签/实体/emoji/URL，不切回终端也能知道 Claude 说了什么
-- **项目名**：标题旁显示当前项目目录名，多项目同时运行时一眼区分
-- **全局生效**：配置在用户级 `~/.claude/settings.json`，对所有项目生效
-- **零第三方依赖**：仅用系统自带的 PowerShell 5.1 + WPF（DirectWrite 渲染，文字与浏览器同源清晰），无需安装任何模块
-- **不抢焦点**：WPF `ShowActivated=false` 显示，不会抢占你正在进行的输入
-- **非阻塞架构**：hook 入口 500ms 内返回（过滤/去重/派生），UI 由独立进程管理，绝不阻塞 Claude Code
-- **等待提醒**：Claude **提问**（AskUserQuestion）或**权限确认**时弹「❓ 在等你回答」「⏳ 在等你批准操作」卡片（附问题/命令摘要）——你在别的窗口写代码也不会错过等待
-- **持久弹窗**：等待类弹窗默认**一直显示**（你回来看一眼就知道），直到手动关闭 / **作答或批准后自动关闭** / 30 分钟安全阀；`/notify_AskUserQuestion_persistence false` 可切回 8 秒自动消失
-- **自动关闭的信号通道**：监听**所有工具**的 PostToolUse / PostToolUseFailure / PermissionDenied（覆盖 WebFetch、WebSearch、Skill、MCP 工具等一切可能弹权限的工具）——经轻量前置过滤器 `notify-close-check.cmd`：**无等待弹窗时约 +30ms 秒退**（不启动 PowerShell），有弹窗等待时才走完整链路（约 +0.2 秒）；双通道匹配（工具调用 ID + 工具参数内容指纹，后者专治 PermissionRequest 官方设计不带 ID 的问题）；弹窗存活期间以 `waiting-*` 握手文件登记，无等待者不产生任何信号文件
-- **重复抑制**：同一会话 2 秒内重复事件只弹一次；忽略 `SubagentStop`；AskUserQuestion 自身的权限噪音自动跳过
-- **脱敏日志**：`%TEMP%\claude-code-notify\notify.log`（200KB 滚动），只记时间/会话前 8 位/结果，不落全文
+</div>
 
-### 弹窗效果
+---
+
+# Claude Code Task Notify
+
+> ChatGPT-style desktop toasts for **Claude Code on Windows** — ✅ task complete / ❓ needs your input / ⏳ waiting for your answer or approval. Wait reminders stay on screen until you come back, and **auto-close the moment you answer or approve**. Pure system PowerShell + WPF — **no third-party modules required**.
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+![Windows](https://img.shields.io/badge/Windows-10%2F11-0078D4?logo=windows&logoColor=white)
+![PowerShell](https://img.shields.io/badge/PowerShell-5.1-5391FE?logo=powershell&logoColor=white)
+![Claude Code](https://img.shields.io/badge/Claude%20Code-v2.x-D97757?logo=claude&logoColor=white)
+[![Stars](https://img.shields.io/github/stars/yyyyolo7a79-sketch/claude-task-notify?style=flat)](https://github.com/yyyyolo7a79-sketch/claude-task-notify/stargazers)
+[![Downloads](https://img.shields.io/github/downloads/yyyyolo7a79-sketch/claude-task-notify/total?style=flat)](https://github.com/yyyyolo7a79-sketch/claude-task-notify/releases)
+
+---
+
+## ✨ Why
+
+- **Always fires** — triggered by Claude Code hooks (harness level, configured in `~/.claude/settings.json`): the toast appears every time Claude stops responding. No model cooperation needed.
+- **Smart detection** — replies ending with a question mark or a request phrase ("please provide…") show **❓ Needs your input**; otherwise **✅ Task complete** (auto-dismisses after 8 s).
+- **Reply summary** — the first paragraph of the reply (180 chars, cleaned of code blocks / HTML / entities / URLs) right in the card, so you know what Claude said without switching back to the terminal.
+- **Project name** — shown next to the title; instantly tells apart multiple projects running at once.
+- **Wait reminders** — when Claude asks a question (`AskUserQuestion`) or requests permission, a **❓ Waiting for your answer** / **⏳ Waiting for your approval** card appears (with the question / command summary). Never miss a stall while you are coding in another window.
+- **Persistent, then auto-closes** — wait cards stay on screen until: you answer/approve (**auto-close**), you click ✕, or a 30-minute safety timeout fires. `/notify_AskUserQuestion_persistence false` switches back to an 8-second auto-dismiss.
+- **Auto-close signal channel** — listens to PostToolUse / PostToolUseFailure / PermissionDenied from **every tool** (WebFetch, WebSearch, Skill, MCP tools — anything that can trigger a permission prompt), through a lightweight `notify-close-check.cmd` pre-filter: **≈30 ms early-exit when nothing is waiting** (no PowerShell cold start), full pipeline (~0.2 s) only while a popup is actually waiting. Matching is dual-channel (tool-call ID + tool-input content fingerprint — `PermissionRequest` carries no `tool_use_id` by design); a `waiting-*` handshake file is written only while a popup is alive, so idle runs produce zero signal files.
+- **Dedup & noise filter** — identical events within 2 s collapse into one toast; `AskUserQuestion`'s own permission noise is skipped.
+- **Global for all projects** — lives in user-level `~/.claude/settings.json`.
+- **Zero dependencies** — only the built-in PowerShell 5.1 + WPF (DirectWrite rendering, as crisp as the browser).
+- **Never steals focus** — shown with `ShowActivated=false` + `WS_EX_NOACTIVATE`.
+- **Non-blocking** — the hook entry returns in <500 ms; the toast UI runs in its own process.
+- **Privacy-minded** — masked log at `%TEMP%\claude-code-notify\notify.log` (200 KB rolling); only timestamps, session prefixes and results — never full text.
+
+### Preview
 
 ```
 ┌────────────────────────────────┐
-│ ✅  任务完成                     │
-│ 已完成所有修改，共改动 3 个文    │
-│ 件，测试全部通过。后续如需部署…  │
+│ ✅  Task complete               │
+│ All changes applied — 3 files  │
+│ touched, tests pass.           │
 └────────────────────────────────┘
-   ↑ 右下角 · 白底黑字 · 圆角 · 淡入淡出
-     8 秒自动消失 · 点击/✕ 立即关闭
+   ↑ bottom-right · white card · rounded
+     auto-dismiss 8 s · click / ✕ to close
 ```
 
-## 🔧 工作原理
+## 🔧 How it works
 
 ```
-Claude Code 事件（~/.claude/settings.json 全局配置，timeout 5s）
+Claude Code events (~/.claude/settings.json, timeout 5s)
         │  stdin JSON
-        ├─ Stop（主回复结束）───────────────┐
-        ├─ PreToolUse(AskUserQuestion)（Claude 提问，等你回答）─┤
-        ├─ PermissionRequest（权限确认，等你批准）─────────────┤
-        └─ PostToolUse / PostToolUseFailure / PermissionDenied（全部工具）
-           → notify-close-check.cmd 前置过滤（无 waiting 秒退）
-           → 有 waiting 才启动 PS 写关闭标志 → exit ────────────┘
+        ├─ Stop (main reply finished) ──────────────┐
+        ├─ PreToolUse(AskUserQuestion) (Claude asks, waiting) ─┤
+        ├─ PermissionRequest (waiting for approval) ──────────┤
+        └─ PostToolUse / PostToolUseFailure / PermissionDenied (all tools)
+           → notify-close-check.cmd pre-filter (early-exit if nothing waits)
+           → PowerShell entry writes close flags → exit ───────┘
         ▼
-notify-complete.ps1（入口，500ms 内返回）
-        │  ① 过滤：上述三类弹窗事件（AskUserQuestion 自身的权限噪音跳过）；
-        │     工具结局事件按双通道写给等待中的弹窗；其余 SKIP
-        │  ② 摘要：本地确定性清洗（代码块/HTML/实体/emoji/URL → 首段 180 字）
-        │  ③ 去重：SHA-256(session+内容)，2 秒窗口内重复只弹一次
-        │  ④ 写临时 payload（含 persist/toolUseId/contentKey）→ Start-Process 派生独立 UI 进程
+notify-complete.ps1  (entry, returns within 500 ms)
+        │  ① filter event type (skip AskUserQuestion's own permission noise)
+        │  ② summarize locally (code blocks/HTML/entities/URLs → first 180 chars)
+        │  ③ dedupe: SHA-256(session + content), 2-second window
+        │  ④ write temp payload (persist / toolUseId / contentKey)
+        │     → spawn show-popup.ps1 as an independent process
         ▼
-show-popup.ps1（独立进程，-STA）
-        │  读取 payload 后立即删除 → 写 waiting 握手文件 → WPF(DirectWrite) 渲染
+show-popup.ps1  (own process, -STA)
+        │  reads payload, deletes it, writes waiting handshake
+        │  → WPF (DirectWrite) renders the card
         ▼
-右下角非模态卡片：不抢焦点 · 圆角+阴影 · 点击/✕ 关闭（无 Esc——无焦点窗口收不到键盘事件）
-  · Stop（任务完成）：8 秒自动淡出
-  · 等待类（提问/权限确认，persist=true）：持久显示 —— 作答/批准后自动关闭 / 手动关闭 / 30 分钟安全阀
-    （关闭信号双通道：close-<tool_use_id>.flag（PreToolUse 类事件有 ID）+ close-k<内容指纹>.flag
-     （PermissionRequest 官方设计不含 tool_use_id，内容指纹是唯一关联键）；UI 每 500ms 轮询；
-      入口仅在 waiting-*.flag 存在（弹窗存活）时才写 close，无等待者零残留）
+Bottom-right card: no focus steal · rounded + shadow · click / ✕ closes
+  · Stop: auto-fades after 8 s
+  · Wait types (question / permission, persist=true): stays until
+    answered/approved (dual-channel close signal) · manual ✕ · 30-min safety timeout
 ```
 
-- hook 入口**快速返回**（500ms 内），UI 生命周期由独立进程管理——弹窗显示期间 Claude Code 完全不受影响
-- `Stop` 表示主 Agent 每轮回复结束（非会话退出）；`SubagentStop`、权限确认、工具确认一律不通知
-- hook 不输出 stdout = 不干预 Claude 的停止行为，任何异常都被捕获并返回 `0`
-- 与 `/config` 内置系统通知互不抑制；若同时开启会双弹，关闭内置通知即可
+## 🚀 Quick Start
 
-## 📁 目录结构
+> Requirements: Windows 10/11 · Claude Code v2.x · PowerShell 5.1 (built in)
 
-```
-claude-task-notify/
-├── README.md                        # 本文件
-├── 原理以及文件路径.md              # 技术原理/文件路径/审查记录（供外部审查）
-├── 弹窗参数调整器.html              # 可视化参数调整工具（浏览器打开）
-├── 需求/                            # 原始需求与规格（不入库）
-├── scripts/
-│   ├── notify-complete.ps1          # hook 入口：过滤/摘要/去重/派生 UI（6 类事件）
-│   ├── notify-close-check.cmd       # 关闭信号 hook 前置过滤器（无等待弹窗时秒退，不启动 PS）
-│   ├── show-popup.ps1               # UI 进程：WPF 卡片弹窗（独立运行，支持持久模式）
-│   └── notify-config.json           # 持久化配置（斜杠命令维护；不存在 = 默认开启）
-├── commands/
-│   └── notify_AskUserQuestion_persistence.md   # 斜杠命令：开关等待类弹窗持久化
-└── skills/
-    └── claude-task-notify/
-        └── SKILL.md                 # 行为规范 skill（可选安装）
-```
+### Install with Claude Code (recommended)
 
-## 🤖 用 Claude Code 安装（推荐）
+Paste the following text together with this repo's link into your Claude Code — it will install everything and self-test:
 
-把下面这段话连同本仓库链接一起发给你的 Claude Code，它会自动完成全部安装并自测：
+> Install the `claude-task-notify` repo `https://github.com/yyyyolo7a79-sketch/claude-task-notify` into my global config (Windows):
+> 1. Copy `scripts\notify-complete.ps1`, `scripts\show-popup.ps1` and `scripts\notify-close-check.cmd` into `~\.claude\scripts\`
+> 2. In `~\.claude\settings.json` add these hook entries at the top level (keep any existing entries; append, do not overwrite): `Stop` (matcher empty) · `PreToolUse` (matcher `AskUserQuestion`) · `PermissionRequest` (matcher empty) · `PostToolUse` / `PostToolUseFailure` / `PermissionDenied` (matcher `*`, all tools);
+>    popup-type commands use the absolute interpreter path with `-WindowStyle Hidden`: `"\"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe\" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File \"C:\Users\<your-username>\.claude\scripts\notify-complete.ps1\""`; close-signal commands point at the pre-filter: `"\"C:\Users\<your-username>\.claude\scripts\notify-close-check.cmd\""`; all with `"timeout": 5`
+> 3. Copy `skills\claude-task-notify\` into `~\.claude\skills\` and `commands\notify_AskUserQuestion_persistence.md` into `~\.claude\commands\`
+> 4. Append the "task-notify" section to `~\.claude\CLAUDE.md` (see manual install step 4)
+> 5. Self-test (set `$OutputEncoding` to UTF-8 first — PS 5.1 pipes would otherwise downgrade non-ASCII to "?"): `$OutputEncoding = [Text.Encoding]::UTF8; $evt = @{session_id="test"; cwd=(Get-Location).Path; hook_event_name="Stop"; stop_hook_active=$false; last_assistant_message="Toast works"} | ConvertTo-Json; $evt | & "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "$HOME\.claude\scripts\notify-complete.ps1"`
 
-> 请把仓库 `https://github.com/yyyyolo7a79-sketch/claude-task-notify` 中的 `claude-task-notify` 安装到我的全局配置（Windows）：
-> 1. 将 `scripts\` 下的 `notify-complete.ps1`、`show-popup.ps1`、`notify-config.json` 复制到 `~\.claude\scripts\`
-> 2. 在 `~\.claude\settings.json` 顶层添加 `hooks` 四类事件（已有其他条目保留追加、不要覆盖）：`Stop`（matcher 空）· `PreToolUse`（matcher `AskUserQuestion`）· `PermissionRequest`（matcher 空）· `PostToolUse`（matcher `AskUserQuestion`）；
->    command 统一用绝对解释器路径 + `-WindowStyle Hidden`：`"\"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe\" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File \"C:\Users\<你的用户名>\.claude\scripts\notify-complete.ps1\""`，`"timeout": 5`
-> 3. 将 `skills\claude-task-notify\` 复制到 `~\.claude\skills\`；将 `commands\notify_AskUserQuestion_persistence.md` 复制到 `~\.claude\commands\`
-> 4. 在 `~\.claude\CLAUDE.md` 末尾追加「任务完成弹窗（全局强制）」小节
-> 5. 自测弹窗（先设 `$OutputEncoding = [Text.Encoding]::UTF8`，防 PS 5.1 管道中文降级）：`$OutputEncoding = [Text.Encoding]::UTF8; $evt = @{session_id="test"; cwd=(Get-Location).Path; hook_event_name="Stop"; stop_hook_active=$false; last_assistant_message="弹窗工作正常"} | ConvertTo-Json; $evt | & "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "$HOME\.claude\scripts\notify-complete.ps1"`
+### Manual install
 
-Claude Code 会按以上步骤执行并触发测试弹窗；也可以按下方「📦 手动安装」自行操作。
-
-## 📦 手动安装
-
-> 环境要求：Windows 10/11，Claude Code v2.x，PowerShell 5.1（系统自带）
-
-**第 1 步**：拷贝脚本
+**Step 1** — copy the scripts:
 
 ```powershell
-# 把 scripts/ 下三个文件复制到用户级脚本目录
+# Three files go to the user-level scripts directory
 Copy-Item scripts\notify-complete.ps1 "$HOME\.claude\scripts\"
 Copy-Item scripts\show-popup.ps1 "$HOME\.claude\scripts\"
 Copy-Item scripts\notify-close-check.cmd "$HOME\.claude\scripts\"
 ```
 
-**第 2 步**：配置全局 hook
-
-编辑 `~/.claude/settings.json`，在顶层新增 `hooks` 键（保留原有配置）：
+**Step 2** — configure the global hooks. Edit `~/.claude/settings.json`, add a `hooks` key at the top level (keep your existing settings):
 
 ```json
 {
@@ -135,82 +126,120 @@ Copy-Item scripts\notify-close-check.cmd "$HOME\.claude\scripts\"
 }
 ```
 
-> `<CMD>` 即：`"\"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File \"C:\\Users\\<你的用户名>\\.claude\\scripts\\notify-complete.ps1\""`（所有事件共用同一入口脚本；若 `PostToolUse` 等键下已有其他条目，**追加**而非覆盖）
+> `<CMD>` is the popup-type command: `"\"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File \"C:\\Users\\<your-username>\\.claude\\scripts\\notify-complete.ps1\""`. If you already have `PostToolUse` entries (e.g. other hooks), **append** rather than overwrite.
 >
-> 💡 `PostToolUse` / `PostToolUseFailure` / `PermissionDenied`（matcher `*` 全工具）是「等待弹窗自动关闭」的信号通道——经 `notify-close-check.cmd` 前置过滤：**无等待弹窗时约 +30ms 秒退**，等待中约 +0.2 秒；`<CMD2>` 即 `"\"C:\\Users\\<你的用户名>\\.claude\\scripts\\notify-close-check.cmd\""`；删除这些条目则等待弹窗退化为手动关闭 / 30 分钟安全阀，其余功能不受影响
+> 💡 `<CMD2>` = `"\"C:\\Users\\<your-username>\\.claude\\scripts\\notify-close-check.cmd\""` is the close-signal channel (matcher `*`): it costs **≈30 ms per tool completion when nothing waits** (the pre-filter early-exits without starting PowerShell) and ~0.2 s only while a popup is waiting. Remove these three entries to degrade wait popups to manual close / 30-min safety timeout.
 
-> ⚠️ 把 `<你的用户名>` 替换为实际路径；配置后无需重启，下一次任务结束即生效。UI 进程由入口自动派生（`-STA` 已内置），hook 本身无需 STA。
+> ⚠️ Replace `<your-username>` with your actual path. No restart needed — effective from the next task. The UI process is spawned automatically (its `-STA` flag is built in).
 >
-> 💡 解释器必须用绝对路径 + `-WindowStyle Hidden`：PATH 里的 `powershell` 可被劫持，且每次 Stop 都会闪现控制台窗口。
+> 💡 Always use the absolute interpreter path + `-WindowStyle Hidden`: a `powershell` from PATH can be hijacked, and without `Hidden` a console window flashes on every Stop.
 
-**第 3 步**（可选）：安装行为规范 skill
+**Step 3** (optional) — install the behavior skill:
 
 ```powershell
 Copy-Item skills\claude-task-notify "$HOME\.claude\skills\" -Recurse
 ```
 
-该 skill 让 Claude 收尾时用 `✅ 已完成：…` / `❓ 需要你提供：…` 格式结束回复，与弹窗判断互相印证，提高识别准确率。
+The skill teaches Claude to end replies with `✅ Done: …` / `❓ Need from you: …` markers, which improves the toast's smart detection.
 
-**第 4 步**（可选）：`~/.claude/CLAUDE.md` 末尾追加声明（便于新会话知晓该能力）：
+**Step 4** (optional) — declare the capability in `~/.claude/CLAUDE.md` so new sessions know about it:
 
 ```markdown
-# 任务完成弹窗（全局强制）
-> hook 已配置：每次任务结束右下角自动弹窗（✅任务完成 / ❓需要用户提供相关信息）。
-> 测试：见下方「🧪 手动测试」，向 notify-complete.ps1 的 stdin 喂 Stop 事件 JSON 即可触发弹窗。
+# Task completion toast (global)
+> Hook configured: a bottom-right toast fires on every task end (✅ complete / ❓ needs input).
+> Test: see the repo README "Test it" section — feed a Stop-event JSON into notify-complete.ps1's stdin.
 ```
 
-## 🎨 参数调整
-
-打开 `弹窗参数调整器.html`（浏览器），拖动滑块实时预览卡片效果，调好后把页面右下角生成的参数代码发回，替换 `show-popup.ps1` 顶部常量区（`$W`/`$H`/`$F_TITLE`/`$F_BODY` 等）即可。
-
-> 预览已按「系统缩放（默认 150%，可在页面调整）× 浏览器缩放」自动校准，所见即真实弹窗的物理大小——与浏览器窗口缩放无关。
-
-| 参数 | 默认值 | 说明 |
-|---|---|---|
-| `$W` / `$H` | 400 / 200 | 卡片宽度 / 高度（px，100% DPI 基准，自动按系统缩放） |
-| `$PAD_X` / `$PAD_TOP` | 20 / 15 | 标题左边距 / 上边距 |
-| `$BODY_TOP` / `$BODY_H` | 52 / 80 | 正文上边距 / 正文区域高度 |
-| `$F_TITLE` / `$F_BODY` | 12 / 10（脚本内 `* 1.3333`） | 标题 / 正文字号（pt；WPF FontSize 单位是 DIP px，pt→px ×4/3） |
-| `$MAX_CHARS` | 180 | 摘要截断长度（字）——在 `notify-complete.ps1` 顶部，不在 show-popup |
-| `$MARGIN` | 20 | 弹窗距屏幕右下角边距 |
-| `$PERSIST_MAX_MS` | 30 分钟 | 持久弹窗安全阀（超时自动淡出，防孤儿弹窗）——在 `show-popup.ps1` 顶部 |
-
-## 🧪 手动测试
+### Test it
 
 ```powershell
-# 直接测入口（stdin 喂 Stop 事件 JSON，应快速返回并弹出卡片）
-# ⚠️ PS 5.1 的 $OutputEncoding 默认 ASCII——不设 UTF-8 时管道中文会降级为 "?"
+# Feed a Stop-event JSON to the entry via stdin; a toast should pop quickly
+# ⚠️ PS 5.1's $OutputEncoding defaults to ASCII — set UTF-8 or non-ASCII degrades to "?"
 $OutputEncoding = [Text.Encoding]::UTF8
 $evt = @{ session_id="test"; cwd=(Get-Location).Path; hook_event_name="Stop";
-          stop_hook_active=$false; last_assistant_message="弹窗工作正常" } | ConvertTo-Json
+          stop_hook_active=$false; last_assistant_message="Toast works" } | ConvertTo-Json
 $evt | & "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "$HOME\.claude\scripts\notify-complete.ps1"
 ```
 
-测试结果可在日志确认：`%TEMP%\claude-code-notify\notify.log`（`OK` = 已通知，`DEDUPE` = 去重，`SKIP` = 被过滤）。
+Check the log at `%TEMP%\claude-code-notify\notify.log` (`OK` = notified, `DEDUPE` = collapsed, `SKIP` = filtered).
 
-## ❓ 常见问题
+## ⚙️ Configuration
 
-| 现象 | 处理 |
+Open `弹窗参数调整器.html` (the visual tuner) in a browser, drag the sliders with a live preview, then paste the generated constants back into the top of `show-popup.ps1` (`$W` / `$H` / `$F_TITLE` / `$F_BODY`, …).
+
+> The preview is auto-calibrated for your system scale (150% default, adjustable on the page) × browser zoom — it matches the real toast's physical size regardless of browser window zoom.
+
+| Setting | Default | Description |
+|---|---|---|
+| `$W` / `$H` | 400 / 200 | Card width / height (px at 100% DPI, scaled automatically) |
+| `$PAD_X` / `$PAD_TOP` | 20 / 15 | Title left / top padding |
+| `$BODY_TOP` / `$BODY_H` | 52 / 80 | Body top offset / body area height |
+| `$F_TITLE` / `$F_BODY` | 12 / 10 (×1.3333 in script) | Title / body font size (pt; WPF uses DIP px, pt→px ×4/3) |
+| `$MAX_CHARS` | 180 | Summary truncation length — top of `notify-complete.ps1` |
+| `$MARGIN` | 20 | Margin from the screen's bottom-right corner |
+| `$PERSIST_MAX_MS` | 30 min | Safety timeout for persistent popups — top of `show-popup.ps1` |
+
+Persistence toggle: `/notify_AskUserQuestion_persistence true|false` (default `true` = wait popups stay; `false` = 8-second auto-dismiss).
+
+## ❓ FAQ
+
+| Symptom | Fix |
 |---|---|
-| 弹窗不出现 | 看日志 `%TEMP%\claude-code-notify\notify.log`：`SKIP` = 被过滤（子代理/权限/递归），`DEDUPE` = 2 秒内重复，`ERR` = 输入或派生失败 |
-| 中文乱码 | 两个脚本必须是 **UTF-8 with BOM**（PowerShell 5.1 对无 BOM 的 UTF-8 按 ANSI/GBK 解释）。本仓库文件已带 BOM，若编辑过请重新保存为 UTF-8 with BOM |
-| 文字模糊 | 已用 WPF（DirectWrite）渲染，与浏览器同源清晰；如仍模糊请确认显示器缩放设置正常 |
-| 与系统通知双弹 | `/config` 中关闭 Claude Code 内置通知（hooks 弹窗与系统通知互不抑制） |
-| 弹窗内容被截断 | 用 `弹窗参数调整器.html` 调大 `$BODY_H` / `$H` 或减小字号 |
-| 等待弹窗一直不消失 | 持久模式的设计（你在等待被提醒）——点 ✕ 关闭，或作答后自动关（安全阀 30 分钟）；`/notify_AskUserQuestion_persistence false` 可切回 8 秒 |
-| 权限弹窗批准后没自动消失 | 已修复（两代问题：① PermissionRequest 无 tool_use_id → 内容指纹通道；② 固定 matcher 列表漏 WebFetch/Skill 等工具 → 全工具挂载 + cmd 前置过滤）；仅在极罕见场景（工具被拒后无后续事件）退化为手动 ✕ / 30 分钟安全阀 |
-| 测试命令偶发 `ERR invalid-json` | PS 5.1 管道传输的间歇问题（仅测试链路；真实 hook 由 Node 写 stdin 不受影响）——重跑一次即可 |
-| 提问时弹出两张卡片 | 旧版已知问题（AskUserQuestion 权限噪音）——更新 `notify-complete.ps1` 到最新版即可 |
-| 想关掉弹窗 | 删除 `settings.json` 中 `hooks` 键即可（脚本可保留） |
+| No toast at all | Check `%TEMP%\claude-code-notify\notify.log`: `SKIP` = filtered (subagent / permission noise / recursion), `DEDUPE` = duplicate within 2 s, `ERR` = input or spawn failure |
+| Mojibake (garbled non-ASCII) | Both `.ps1` files must be **UTF-8 with BOM** (PS 5.1 reads BOM-less UTF-8 as ANSI). The repo files ship with BOM; re-save with BOM if you edited them |
+| Blurry text | Rendering is WPF (DirectWrite) — as crisp as the browser. If still blurry, check your display scaling settings |
+| Duplicate toasts (with system notification) | Disable Claude Code's built-in notification in `/config` (hooks and system notifications don't suppress each other) |
+| Card content truncated | Use the tuner to raise `$BODY_H` / `$H` or lower font sizes |
+| Wait popup never disappears | By design it persists (you are being reminded) — click ✕, or answer/approve to auto-close (30-min safety timeout); `/notify_AskUserQuestion_persistence false` reverts to 8 s |
+| Permission popup didn't auto-close after approval | Fixed (two generations: ① `PermissionRequest` has no `tool_use_id` → content-fingerprint channel; ② a fixed matcher list missed WebFetch/Skill etc. → all-tool mount + cmd pre-filter). In the rare case of a denied tool with no follow-up event it degrades to manual ✕ / 30-min safety timeout |
+| Occasional `ERR invalid-json` in manual tests | Intermittent PS 5.1 pipe issue (test path only; real hooks write UTF-8 stdin from Node, unaffected) — just re-run |
+| Two cards when asking a question | Old-version issue (AskUserQuestion permission noise) — update `notify-complete.ps1` |
 
-## 🗑 卸载
+## 📝 Changelog
 
-1. 删除 `~/.claude/settings.json` 中的 `hooks` 键（或仅删除其中的 `Stop` / `PreToolUse` / `PermissionRequest` / `PostToolUse` 四个通知条目，保留你的其他 hook）
-2. 删除 `~/.claude/scripts/` 下的 `notify-complete.ps1`、`show-popup.ps1`、`notify-config.json`
-3. 删除 `~/.claude/skills/claude-task-notify/` 目录与 `~/.claude/commands/notify_AskUserQuestion_persistence.md`
-4. 删除 `~/.claude/CLAUDE.md` 中追加的小节（若有）
-5. 可选：删除临时目录 `%TEMP%\claude-code-notify\`
+### 2026-09-19 — All-tool close-signal coverage
 
-## 📄 许可证
+- Root cause: the close-signal hooks used a fixed matcher list (`Bash|Edit|Write|MultiEdit|NotebookEdit`); permission prompts from tools outside the list (WebFetch, Skill, MCP, …) never fired the "tool finished" hook, so their popups stayed on screen forever.
+- Fix: matcher `*` on PostToolUse / PostToolUseFailure / PermissionDenied + new `notify-close-check.cmd` pre-filter (≈30 ms early-exit when nothing waits; no PowerShell cold start).
 
-MIT
+### 2026-09-18 — Wait-popup auto-close fixed
+
+- Root cause: `PermissionRequest` carries **no `tool_use_id`** (by design) — permission popups could never match a close signal.
+- Fix: dual-channel close signals (tool-call ID + content fingerprint `SHA256(tool_name+tool_input)[:16]`), `waiting-*` handshake files (zero files when nothing waits), plus `PermissionDenied` coverage.
+
+### 2026-09-17 — First release: wait reminders & persistent popups
+
+- Four bug fixes (dedupe timezone, 30-DIP positioning offset, question double-toast, docs/pipes).
+- New: ❓/⏳ wait reminders on question / permission, persistent by default with auto-close, `/notify_AskUserQuestion_persistence` command.
+
+<details>
+<summary>Earlier (2026-08) — initial development</summary>
+
+- Stop-hook toast MVP → full WPF rewrite (DirectWrite), multi-monitor/DPI positioning, non-blocking spawn architecture, dedupe, masked logging, nine rounds of external review hardening.
+
+</details>
+
+## 🛠 Development
+
+No build step — the scripts are the product.
+
+- `scripts/notify-complete.ps1` — hook entry (filter / summarize / dedupe / spawn).
+- `scripts/show-popup.ps1` — the toast UI process.
+- `scripts/notify-close-check.cmd` — close-signal pre-filter (must stay **ASCII, no BOM**; cmd chokes on a BOM).
+- Both `.ps1` files **must be saved as UTF-8 with BOM** (PS 5.1 reads BOM-less UTF-8 as ANSI).
+- After editing, verify syntax: `[System.Management.Automation.Language.Parser]::ParseFile('...', [ref]$null, [ref]$errs)`.
+- Test by feeding event JSON to the entry (see "Test it"); watch `%TEMP%\claude-code-notify\notify.log`.
+
+## 🗑 Uninstall
+
+1. Remove the `hooks` entries from `~/.claude/settings.json` (or just the six notify entries, keeping your other hooks).
+2. Delete `notify-complete.ps1`, `show-popup.ps1`, `notify-close-check.cmd` and `notify-config.json` from `~/.claude/scripts/`.
+3. Delete `~/.claude/skills/claude-task-notify/` and `~/.claude/commands/notify_AskUserQuestion_persistence.md`.
+4. Remove the appended section from `~/.claude/CLAUDE.md` (if any).
+5. Optional: delete `%TEMP%\claude-code-notify\`.
+
+## 📄 License & Credits
+
+MIT — see [LICENSE](LICENSE).
+
+UX inspired by the ChatGPT desktop app and Codex's completion toast: non-modal, focus-free, bottom-right, auto-dismiss.
