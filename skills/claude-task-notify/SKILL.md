@@ -15,7 +15,7 @@ Claude Code 的关键「等待/完成」时刻，Windows 右下角自动弹出�
 - 正文自动清洗（截断 180 字、自动换行）；白色圆角卡片（黑字）、淡入淡出、点击卡片或右上角 ✕ 立即关闭（无 Esc——无焦点窗口收不到键盘事件）
 - 持久化开关：`/notify_AskUserQuestion_persistence true|false`（默认 true = 持久）
 
-**触发机制**：全局 `~/.claude/settings.json` 的 6 类 hook（弹窗：`Stop` / `PreToolUse:AskUserQuestion` / `PermissionRequest`；关闭信号：`PostToolUse` / `PostToolUseFailure` / `PermissionDenied`）→ `~/.claude/scripts/notify-complete.ps1`（hook 命令必须是绝对解释器路径 + `-WindowStyle Hidden`，否则每次 Stop 闪现控制台窗口）。等待类弹窗的自动关闭为双通道匹配（工具调用 ID + 工具参数内容指纹——PermissionRequest 官方设计不含 ID，指纹是权限弹窗的唯一关联键），且仅在弹窗存活（waiting 握手存在）时写信号。这是 **harness 层强制执行**，对**所有项目**生效，与模型行为无关——不需要本 skill 被触发，弹窗也照常出现。
+**触发机制**：全局 `~/.claude/settings.json` 的 6 类 hook（弹窗：`Stop` / `PreToolUse:AskUserQuestion` / `PermissionRequest`；关闭信号：`PostToolUse` / `PostToolUseFailure` / `PermissionDenied`，**matcher `*` 全工具**经 `notify-close-check.cmd` 前置过滤——无等待弹窗时秒退、不启动 PS）→ `~/.claude/scripts/notify-complete.ps1`（hook 命令必须是绝对解释器路径 + `-WindowStyle Hidden`，否则每次 Stop 闪现控制台窗口）。等待类弹窗的自动关闭为双通道匹配（工具调用 ID + 工具参数内容指纹——PermissionRequest 官方设计不含 ID，指纹是权限弹窗的唯一关联键），且仅在弹窗存活（waiting 握手存在）时写信号。这是 **harness 层强制执行**，对**所有项目**生效，与模型行为无关——不需要本 skill 被触发，弹窗也照常出现。
 
 ## Claude 收尾行为规范（与弹窗判断配合）
 

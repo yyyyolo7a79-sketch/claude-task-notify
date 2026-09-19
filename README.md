@@ -14,7 +14,7 @@
 - **非阻塞架构**：hook 入口 500ms 内返回（过滤/去重/派生），UI 由独立进程管理，绝不阻塞 Claude Code
 - **等待提醒**：Claude **提问**（AskUserQuestion）或**权限确认**时弹「❓ 在等你回答」「⏳ 在等你批准操作」卡片（附问题/命令摘要）——你在别的窗口写代码也不会错过等待
 - **持久弹窗**：等待类弹窗默认**一直显示**（你回来看一眼就知道），直到手动关闭 / **作答或批准后自动关闭** / 30 分钟安全阀；`/notify_AskUserQuestion_persistence false` 可切回 8 秒自动消失
-- **自动关闭的信号通道**：监听 `Bash|Edit|Write` 类工具的 PostToolUse / PostToolUseFailure / PermissionDenied（**每次此类工具完成约 +0.15 秒**）——双通道匹配（工具调用 ID + 工具参数内容指纹，后者专治 PermissionRequest 官方设计不带 ID 的问题）；弹窗存活期间以 `waiting-*` 握手文件登记，无等待者时不产生任何信号文件；不需要可在 `settings.json` 删除这三个条目（功能降级为手动关闭，其余不受影响）
+- **自动关闭的信号通道**：监听**所有工具**的 PostToolUse / PostToolUseFailure / PermissionDenied（覆盖 WebFetch、WebSearch、Skill、MCP 工具等一切可能弹权限的工具）——经轻量前置过滤器 `notify-close-check.cmd`：**无等待弹窗时约 +30ms 秒退**（不启动 PowerShell），有弹窗等待时才走完整链路（约 +0.2 秒）；双通道匹配（工具调用 ID + 工具参数内容指纹，后者专治 PermissionRequest 官方设计不带 ID 的问题）；弹窗存活期间以 `waiting-*` 握手文件登记，无等待者不产生任何信号文件
 - **重复抑制**：同一会话 2 秒内重复事件只弹一次；忽略 `SubagentStop`；AskUserQuestion 自身的权限噪音自动跳过
 - **脱敏日志**：`%TEMP%\claude-code-notify\notify.log`（200KB 滚动），只记时间/会话前 8 位/结果，不落全文
 
@@ -38,8 +38,9 @@ Claude Code 事件（~/.claude/settings.json 全局配置，timeout 5s）
         ├─ Stop（主回复结束）───────────────┐
         ├─ PreToolUse(AskUserQuestion)（Claude 提问，等你回答）─┤
         ├─ PermissionRequest（权限确认，等你批准）─────────────┤
-        └─ PostToolUse / PostToolUseFailure / PermissionDenied
-           （工具完成/失败/被拒）→ 写关闭标志 → exit ─────────┘
+        └─ PostToolUse / PostToolUseFailure / PermissionDenied（全部工具）
+           → notify-close-check.cmd 前置过滤（无 waiting 秒退）
+           → 有 waiting 才启动 PS 写关闭标志 → exit ────────────┘
         ▼
 notify-complete.ps1（入口，500ms 内返回）
         │  ① 过滤：上述三类弹窗事件（AskUserQuestion 自身的权限噪音跳过）；
@@ -73,7 +74,8 @@ claude-task-notify/
 ├── 弹窗参数调整器.html              # 可视化参数调整工具（浏览器打开）
 ├── 需求/                            # 原始需求与规格（不入库）
 ├── scripts/
-│   ├── notify-complete.ps1          # hook 入口：过滤/摘要/去重/派生 UI（4 类事件）
+│   ├── notify-complete.ps1          # hook 入口：过滤/摘要/去重/派生 UI（6 类事件）
+│   ├── notify-close-check.cmd       # 关闭信号 hook 前置过滤器（无等待弹窗时秒退，不启动 PS）
 │   ├── show-popup.ps1               # UI 进程：WPF 卡片弹窗（独立运行，支持持久模式）
 │   └── notify-config.json           # 持久化配置（斜杠命令维护；不存在 = 默认开启）
 ├── commands/
@@ -104,9 +106,10 @@ Claude Code 会按以上步骤执行并触发测试弹窗；也可以按下方�
 **第 1 步**：拷贝脚本
 
 ```powershell
-# 把 scripts/ 下两个脚本复制到用户级脚本目录
+# 把 scripts/ 下三个文件复制到用户级脚本目录
 Copy-Item scripts\notify-complete.ps1 "$HOME\.claude\scripts\"
 Copy-Item scripts\show-popup.ps1 "$HOME\.claude\scripts\"
+Copy-Item scripts\notify-close-check.cmd "$HOME\.claude\scripts\"
 ```
 
 **第 2 步**：配置全局 hook
@@ -120,14 +123,13 @@ Copy-Item scripts\show-popup.ps1 "$HOME\.claude\scripts\"
     "PreToolUse": [{ "matcher": "AskUserQuestion", "hooks": [{ "type": "command", "command": "<CMD>", "timeout": 5 }] }],
     "PermissionRequest": [{ "matcher": "", "hooks": [{ "type": "command", "command": "<CMD>", "timeout": 5 }] }],
     "PostToolUse": [
-      { "matcher": "AskUserQuestion", "hooks": [{ "type": "command", "command": "<CMD>", "timeout": 5 }] },
-      { "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit", "hooks": [{ "type": "command", "command": "<CMD>", "timeout": 5 }] }
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "<CMD2>", "timeout": 5 }] }
     ],
     "PostToolUseFailure": [
-      { "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit|AskUserQuestion", "hooks": [{ "type": "command", "command": "<CMD>", "timeout": 5 }] }
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "<CMD2>", "timeout": 5 }] }
     ],
     "PermissionDenied": [
-      { "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit|AskUserQuestion", "hooks": [{ "type": "command", "command": "<CMD>", "timeout": 5 }] }
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "<CMD2>", "timeout": 5 }] }
     ]
   }
 }
@@ -135,7 +137,7 @@ Copy-Item scripts\show-popup.ps1 "$HOME\.claude\scripts\"
 
 > `<CMD>` 即：`"\"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File \"C:\\Users\\<你的用户名>\\.claude\\scripts\\notify-complete.ps1\""`（所有事件共用同一入口脚本；若 `PostToolUse` 等键下已有其他条目，**追加**而非覆盖）
 >
-> 💡 `PostToolUse` 的第二条加 `PostToolUseFailure` / `PermissionDenied` 三条是「等待弹窗自动关闭」的信号通道——**代价：每次此类工具完成约 +0.15 秒**；删除这些条目则等待弹窗退化为手动关闭 / 30 分钟安全阀，其余功能不受影响
+> 💡 `PostToolUse` / `PostToolUseFailure` / `PermissionDenied`（matcher `*` 全工具）是「等待弹窗自动关闭」的信号通道——经 `notify-close-check.cmd` 前置过滤：**无等待弹窗时约 +30ms 秒退**，等待中约 +0.2 秒；`<CMD2>` 即 `"\"C:\\Users\\<你的用户名>\\.claude\\scripts\\notify-close-check.cmd\""`；删除这些条目则等待弹窗退化为手动关闭 / 30 分钟安全阀，其余功能不受影响
 
 > ⚠️ 把 `<你的用户名>` 替换为实际路径；配置后无需重启，下一次任务结束即生效。UI 进程由入口自动派生（`-STA` 已内置），hook 本身无需 STA。
 >
@@ -196,7 +198,7 @@ $evt | & "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile
 | 与系统通知双弹 | `/config` 中关闭 Claude Code 内置通知（hooks 弹窗与系统通知互不抑制） |
 | 弹窗内容被截断 | 用 `弹窗参数调整器.html` 调大 `$BODY_H` / `$H` 或减小字号 |
 | 等待弹窗一直不消失 | 持久模式的设计（你在等待被提醒）——点 ✕ 关闭，或作答后自动关（安全阀 30 分钟）；`/notify_AskUserQuestion_persistence false` 可切回 8 秒 |
-| 权限弹窗批准后没自动消失 | 旧版已知 bug（PermissionRequest 官方设计不含 tool_use_id，弹窗无法匹配关闭信号）——更新脚本即修复；新版仅在极罕见场景（如工具被拒绝）退化为手动 ✕ / 30 分钟安全阀 |
+| 权限弹窗批准后没自动消失 | 已修复（两代问题：① PermissionRequest 无 tool_use_id → 内容指纹通道；② 固定 matcher 列表漏 WebFetch/Skill 等工具 → 全工具挂载 + cmd 前置过滤）；仅在极罕见场景（工具被拒后无后续事件）退化为手动 ✕ / 30 分钟安全阀 |
 | 测试命令偶发 `ERR invalid-json` | PS 5.1 管道传输的间歇问题（仅测试链路；真实 hook 由 Node 写 stdin 不受影响）——重跑一次即可 |
 | 提问时弹出两张卡片 | 旧版已知问题（AskUserQuestion 权限噪音）——更新 `notify-complete.ps1` 到最新版即可 |
 | 想关掉弹窗 | 删除 `settings.json` 中 `hooks` 键即可（脚本可保留） |
